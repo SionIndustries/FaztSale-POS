@@ -150,7 +150,7 @@
     30%,50%,70%{transform:translateX(-4px);} 40%,60%{transform:translateX(4px);}
   }
   #complete-sale-btn.is-loading{cursor:wait;}
-  #complete-sale-btn.is-success{background:var(--green); border-color:var(--green); color:#fff;}
+  #complete-sale-btn.is-success{background:var(--green); border-color:var(--green); color:var(--paper);}
   .btn-spinner{display:inline-block; width:14px; height:14px; vertical-align:-2px; border:2px solid rgba(255,255,255,0.35); border-top-color:currentColor; border-radius:50%; animation:loading-spin 1s linear infinite;}
 
   /* Pagination slide (Next/Prev) — JS drives the transform/opacity inline;
@@ -392,7 +392,7 @@ const CLIENT_CONFIG = {
       </div>
     </div>
     <div id="inv-table-wrap" style="overflow-x:auto; border:1px solid var(--line-strong); border-radius:8px;">
-      <table id="inv-table" style="width:100%; border-collapse:collapse; font-size:13px;">
+      <table id="inv-table" style="min-width:100%; width:max-content; border-collapse:collapse; font-size:13px;">
         <thead><tr style="background:var(--ink); color:var(--paper);"></tr></thead>
         <tbody id="inv-rows"></tbody>
       </table>
@@ -413,7 +413,7 @@ const CLIENT_CONFIG = {
       </div>
     </div>
     <div style="overflow-x:auto; border:1px solid var(--line-strong); border-radius:8px;">
-      <table style="width:100%; border-collapse:collapse; font-size:13px;">
+      <table style="min-width:100%; width:max-content; border-collapse:collapse; font-size:13px;">
         <thead><tr id="backupview-thead" style="background:var(--ink); color:var(--paper);"></tr></thead>
         <tbody id="backupview-rows"></tbody>
       </table>
@@ -2048,7 +2048,7 @@ function updateRangePreview(){
   const previewRows = [];
   for (let r=importDataRowStart; r<=Math.min(importDataRowEnd, importDataRowStart+9); r++) previewRows.push(importSelectedCols.map(c => (importGrid[r]&&importGrid[r][c]!=null) ? String(importGrid[r][c]) : ''));
   const totalDataRows = Math.max(0, importDataRowEnd-importDataRowStart+1);
-  let html = '<table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr style="background:var(--ink); color:var(--paper);">';
+  let html = '<table style="min-width:100%; width:max-content; border-collapse:collapse; font-size:12px;"><thead><tr style="background:var(--ink); color:var(--paper);">';
   html += importSelectedCols.map((c,i)=>`<th class="mono" style="padding:6px 8px; text-align:left;">${colIndexToLetter(c)}<br>"${escapeHtml(headerCells[i])}"</th>`).join('');
   html += '</tr></thead><tbody>';
   previewRows.forEach(row => { html += '<tr>' + row.map(v=>`<td style="padding:5px 8px; border-top:1px solid var(--line);">${escapeHtml(v)}</td>`).join('') + '</tr>'; });
@@ -2937,8 +2937,17 @@ async function processSyncQueue(auto){
   if (!window.__fsSync) { await refreshSyncStatusUI(); return; }
   const branchId = await getBranchId();
   if (!branchId) { await refreshSyncStatusUI(); return; }
-  const ops = await getPendingSyncOps();
-  if (!ops.length) { await refreshSyncStatusUI(); return; }
+  const allOps = await getPendingSyncOps();
+  if (!allOps.length) { await refreshSyncStatusUI(); return; }
+  // Process in bounded batches, not the whole backlog in one call. With a
+  // large queue (thousands of ops after a big import or price change),
+  // one unbounded sequential loop can run past the 90s staleness window
+  // above — which then clears the lock and lets the NEXT tick start a
+  // second overlapping run on the same queue while the first is still
+  // genuinely working, not actually stuck. Capping keeps each run well
+  // under that window; the rest drains over the following auto-sync ticks.
+  const SYNC_BATCH_SIZE = 300;
+  const ops = allOps.slice(0, SYNC_BATCH_SIZE);
   syncInProgress = true;
   syncStartedAt = Date.now();
   await refreshSyncStatusUI();
@@ -4119,7 +4128,9 @@ let ownerCachedParts = []; // last-fetched parts + cost, for client-side search 
 let ownerGhostCount = 0; // brand-and-part-less docs hidden from the Inventory tab this fetch
 let ownerProfitGhostCount = 0; // same, but for Profit tab's stock-value calc — kept separate so the two tabs' banners can't get crossed
 let ownerCostError = null; // set when the cost collectionGroup query fails — usually a missing Firestore index, silently zeroing cost everywhere until surfaced
+let ownerCostErrorCode = null; // 'failed-precondition' (missing index) vs 'permission-denied' (rules) — .message alone can't tell these apart, see getOwnerCostMap
 let ownerProfitCostError = null;
+let ownerProfitCostErrorCode = null;
 let ownerSessionCache = {}; // in-memory only — cleared on page reload, not persisted. Keeps
                              // switching between Owner Lobby tabs from re-reading the entire
                              // parts collection from Firestore every single time, which is what
@@ -4171,10 +4182,10 @@ function renderOwnerToolbar(){
   }
 }
 function ownerTable(headers, rows, emptyMsg){
-  return `<table class="mono" style="width:100%; border-collapse:collapse; font-size:13px;">
-    <thead><tr style="background:var(--ink); color:#fff;">${headers.map(h=>`<th style="padding:6px 8px; text-align:${h.right?'right':'left'};">${h.label}</th>`).join('')}</tr></thead>
+  return `<div style="overflow-x:auto; border:1px solid var(--line-strong); border-radius:8px;"><table class="mono" style="min-width:100%; width:max-content; border-collapse:collapse; font-size:13px;">
+    <thead><tr style="background:var(--ink); color:var(--paper);">${headers.map(h=>`<th style="padding:6px 8px; text-align:${h.right?'right':'left'}; white-space:nowrap;">${h.label}</th>`).join('')}</tr></thead>
     <tbody>${rows.length ? rows.join('') : `<tr><td colspan="${headers.length}" style="padding:6px 8px;" class="part-meta">${emptyMsg}</td></tr>`}</tbody>
-  </table>`;
+  </table></div>`;
 }
 function switchOwnerTab(tab){
   currentOwnerTab = tab;
@@ -4270,11 +4281,22 @@ async function getOwnerCostMap(branchId){
     return { map, error: (e && e.message) ? e.message : String(e), code: (e && e.code) || null };
   }
 }
+// e.code was captured specifically so this message doesn't have to guess —
+// 'failed-precondition' means Firestore itself is asking for an index that
+// doesn't exist yet (and usually links to create it in its own error, check
+// the browser console); 'permission-denied' means the rules actually reject
+// this read. Different fixes, so don't make the person dig through devtools
+// to tell them apart.
+function costErrorHint(code){
+  if (code === 'failed-precondition') return 'This is a missing Firestore composite index — go to Firestore \u2192 Indexes \u2192 Composite \u2192 Add index, collection group "costData", field "branchId" (Ascending), query scope "Collection group". Check the browser console too: Firestore often prints a direct "create this index" link the first time the query runs.';
+  if (code === 'permission-denied') return 'This is a security rules problem, not an index problem \u2014 the signed-in account doesn\u2019t satisfy the costData read rule (isOwner() or isBranchAdmin(branchId) for its own branch). Check which role/branch this session actually has.';
+  return 'Check the browser console for the full error \u2014 the exact Firestore error code (not just the message) determines whether this is a missing index or a rules problem.';
+}
 async function renderOwnerInventory(branchId, forceRefresh){
   const cacheKey = `${branchId}::inventory`;
   const cached = ownerSessionCache[cacheKey];
   if (!forceRefresh && cached) {
-    ownerCachedParts = cached.parts; ownerCachedCostMap = cached.costMap; ownerGhostCount = cached.ghostCount; ownerCostError = cached.costError || null;
+    ownerCachedParts = cached.parts; ownerCachedCostMap = cached.costMap; ownerGhostCount = cached.ghostCount; ownerCostError = cached.costError || null; ownerCostErrorCode = cached.costErrorCode || null;
     renderOwnerInventoryTable();
     return true; // served from cache
   }
@@ -4302,7 +4324,8 @@ async function renderOwnerInventory(branchId, forceRefresh){
   ownerCachedParts = parts;
   ownerCachedCostMap = costMap;
   ownerCostError = costResult.error;
-  ownerSessionCache[cacheKey] = { parts, costMap, ghostCount, costError: costResult.error, at: Date.now() };
+  ownerCostErrorCode = costResult.code || null;
+  ownerSessionCache[cacheKey] = { parts, costMap, ghostCount, costError: costResult.error, costErrorCode: costResult.code || null, at: Date.now() };
   renderOwnerInventoryTable();
   return false;
 }
@@ -4317,7 +4340,7 @@ function renderOwnerInventoryTable(){
     <div style="padding:12px; border:1px solid var(--line); border-radius:8px; margin-bottom:14px;">
       <div class="part-meta">${parts.length.toLocaleString()} of ${ownerCachedParts.length.toLocaleString()} parts shown · ${totalUnits.toLocaleString()} units on hand · ₱${totalValue.toLocaleString()} retail value</div>
       ${ownerGhostCount ? `<div class="part-meta" style="margin-top:6px; color:var(--warn, #a15c00);">${ownerGhostCount.toLocaleString()} incomplete record(s) hidden (no brand/part name synced yet) — ask the Admin to run "Push new parts to Firestore" again to repair them.</div>` : ''}
-      ${ownerCostError ? `<div class="part-meta" style="margin-top:6px; color:var(--red);">Cost data failed to load (${escapeHtml(ownerCostError)}) — every Cost value below is showing blank/wrong as a result, not because it's actually missing. This is very likely a missing Firestore index for the costData collectionGroup query — check the Firebase Console for an index-creation prompt.</div>` : ''}
+      ${ownerCostError ? `<div class="part-meta" style="margin-top:6px; color:var(--red);">Cost data failed to load (${escapeHtml(ownerCostError)}) — every Cost value below is showing blank/wrong as a result, not because it's actually missing. ${costErrorHint(ownerCostErrorCode)}</div>` : ''}
     </div>
     ${ownerTable(
       [{label:'Code'},{label:'Brand'},{label:'Part'},{label:'Qty',right:true},{label:'Cost',right:true},{label:'Price',right:true}],
@@ -4330,7 +4353,7 @@ async function renderOwnerProfit(branchId, forceRefresh){
   const cached = ownerSessionCache[cacheKey];
   if (!forceRefresh && cached) {
     if (ownerDateFilter) ownerCachedProfitSales = cached.sales;
-    else { ownerCachedProfitParts = cached.parts; ownerCachedProfitCostMap = cached.costMap; ownerProfitGhostCount = cached.ghostCount || 0; ownerProfitCostError = cached.costError || null; }
+    else { ownerCachedProfitParts = cached.parts; ownerCachedProfitCostMap = cached.costMap; ownerProfitGhostCount = cached.ghostCount || 0; ownerProfitCostError = cached.costError || null; ownerProfitCostErrorCode = cached.costErrorCode || null; }
     renderOwnerProfitView();
     return true;
   }
@@ -4366,7 +4389,8 @@ async function renderOwnerProfit(branchId, forceRefresh){
     ownerCachedProfitCostMap = costMap;
     ownerProfitGhostCount = ghostCount;
     ownerProfitCostError = costResult.error;
-    ownerSessionCache[cacheKey] = { parts, costMap, ghostCount, costError: costResult.error, at: Date.now() };
+    ownerProfitCostErrorCode = costResult.code || null;
+    ownerSessionCache[cacheKey] = { parts, costMap, ghostCount, costError: costResult.error, costErrorCode: costResult.code || null, at: Date.now() };
   }
   renderOwnerProfitView();
   return false;
@@ -4402,7 +4426,7 @@ function renderOwnerProfitView(){
         <div class="row-line" style="justify-content:space-between;"><span>Potential margin sitting in stock</span><strong>₱${(retailValue-costValue).toLocaleString()}</strong></div>
         ${missingCost ? `<div class="part-meta" style="margin-top:8px;">${missingCost} part(s) have no cost data synced yet — excluded from cost totals above.</div>` : ''}
         ${ownerProfitGhostCount ? `<div class="part-meta" style="margin-top:4px; color:var(--warn, #a15c00);">${ownerProfitGhostCount.toLocaleString()} incomplete record(s) excluded (no brand/part name synced yet) — ask the Admin to run "Push new parts to Firestore" again to repair them.</div>` : ''}
-        ${ownerProfitCostError ? `<div class="part-meta" style="margin-top:4px; color:var(--red);">Cost data failed to load (${escapeHtml(ownerProfitCostError)}) — "Stock at cost" and margin above are showing 0/wrong as a result, not because cost is actually missing. This is very likely a missing Firestore index for the costData collectionGroup query — check the Firebase Console for an index-creation prompt.</div>` : ''}
+        ${ownerProfitCostError ? `<div class="part-meta" style="margin-top:4px; color:var(--red);">Cost data failed to load (${escapeHtml(ownerProfitCostError)}) — "Stock at cost" and margin above are showing 0/wrong as a result, not because cost is actually missing. ${costErrorHint(ownerProfitCostErrorCode)}</div>` : ''}
       </div>`;
   }
 }
