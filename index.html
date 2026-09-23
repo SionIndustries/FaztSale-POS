@@ -161,24 +161,19 @@
      value, then swaps to height:auto once the transition ends. */
   .row-line{transition: background-color 100ms linear;}
 
-  /* ---- Toast / non-blocking notifications (safety net) ---- */
-  #toast-root{position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:10050; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; max-width:min(420px,92vw);}
-  .toast{pointer-events:auto; background:var(--card); color:var(--ink); border:1px solid var(--line-strong); border-radius:10px; padding:12px 16px; font-size:13px; line-height:1.4; box-shadow:0 8px 24px rgba(0,0,0,0.18); opacity:0; transform:translateY(12px); transition:opacity 220ms ease, transform 220ms ease; max-width:100%; word-break:break-word;}
+  /* ---- Non-blocking dialogs (replace native alert/confirm) + toasts ---- */
+  .dlg-overlay{position:fixed; inset:0; z-index:9997; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; padding:20px; opacity:0; transition:opacity var(--dur-layout) var(--ease-standard);}
+  .dlg-overlay.show{opacity:1;}
+  .dlg-box{background:var(--card); border:1px solid var(--line-strong); border-radius:var(--radius); max-width:440px; width:100%; padding:20px; transform:translateY(8px) scale(0.98); transition:transform var(--dur-layout) var(--ease-standard); box-shadow:0 12px 32px rgba(0,0,0,0.25);}
+  .dlg-overlay.show .dlg-box{transform:translateY(0) scale(1);}
+  .dlg-title{font-family:'Arial Black',Impact,sans-serif; font-size:15px; margin-bottom:8px; color:var(--ink);}
+  .dlg-msg{font-size:13.5px; line-height:1.5; color:var(--ink); white-space:pre-wrap; max-height:50vh; overflow-y:auto;}
+  .dlg-actions{display:flex; justify-content:flex-end; gap:8px; margin-top:18px;}
+  #toast-host{position:fixed; top:calc(16px + env(safe-area-inset-top, 0px)); left:50%; transform:translateX(-50%); z-index:9999; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none;}
+  .toast{pointer-events:auto; background:var(--card); border:1px solid var(--line-strong); border-radius:8px; padding:10px 16px; font-size:13px; color:var(--ink); box-shadow:0 6px 20px rgba(0,0,0,0.2); opacity:0; transform:translateY(-8px); transition:opacity var(--dur-layout) var(--ease-standard), transform var(--dur-layout) var(--ease-standard); max-width:min(90vw, 420px);}
   .toast.show{opacity:1; transform:translateY(0);}
-  .toast.toast-error{border-color:var(--red); background:var(--red-bg); color:var(--red);}
-  .toast.toast-success{border-color:var(--green); background:var(--green-bg); color:var(--green);}
-  .toast.toast-warn{border-color:var(--warn-border); background:var(--warn-bg); color:var(--warn-text);}
-  .toast .toast-close{float:right; margin-left:10px; border:none; background:none; cursor:pointer; font-size:14px; opacity:0.6; color:inherit; padding:0 2px;}
-  .toast .toast-close:hover{opacity:1;}
-
-  /* Non-blocking modal for confirm/prompt replacement */
-  #app-modal-root{display:none; position:fixed; inset:0; z-index:10040; background:rgba(0,0,0,0.55); align-items:center; justify-content:center; padding:16px;}
-  #app-modal-root.show{display:flex;}
-  #app-modal{background:var(--card); border-radius:var(--radius); max-width:420px; width:100%; padding:24px; border:1px solid var(--line-strong); box-shadow:0 16px 40px rgba(0,0,0,0.25);}
-  #app-modal h3{margin:0 0 10px; font-family:'Arial Black',Impact,sans-serif; font-size:16px;}
-  #app-modal p{margin:0 0 16px; font-size:13px; line-height:1.5; white-space:pre-wrap;}
-  #app-modal input{width:100%; margin-bottom:14px;}
-  #app-modal .modal-actions{display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;}
+  .toast-error{border-color:var(--warn-border); background:var(--warn-bg); color:var(--warn-text);}
+  .toast-success{border-color:#4ADE80;}
 </style>
 </head>
 <body>
@@ -258,16 +253,6 @@ const CLIENT_CONFIG = {
   </div>
 </div>
 <style>@keyframes loading-spin{to{transform:rotate(360deg);}}</style>
-
-<div id="toast-root" aria-live="polite" aria-relevant="additions"></div>
-<div id="app-modal-root" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">
-  <div id="app-modal">
-    <h3 id="app-modal-title"></h3>
-    <p id="app-modal-body"></p>
-    <input type="text" id="app-modal-input" style="display:none;" autocomplete="off">
-    <div class="modal-actions" id="app-modal-actions"></div>
-  </div>
-</div>
 
 <div class="wrap" id="app-root" style="display:none;">
   <header class="top">
@@ -999,136 +984,6 @@ function setLoadingText(msg){
 }
 window.showLoading = showLoading;
 window.hideLoading = hideLoading;
-
-/* ---- Safety net: toast + non-blocking modal + global error handlers ---- */
-function showToast(message, type, durationMs){
-  const root = document.getElementById('toast-root');
-  if (!root) { console.warn('[toast]', message); return; }
-  const el = document.createElement('div');
-  el.className = 'toast' + (type === 'error' ? ' toast-error' : type === 'success' ? ' toast-success' : type === 'warn' ? ' toast-warn' : '');
-  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'toast-close';
-  closeBtn.type = 'button';
-  closeBtn.setAttribute('aria-label', 'Dismiss');
-  closeBtn.textContent = '×';
-  closeBtn.onclick = () => dismissToast(el);
-  el.appendChild(closeBtn);
-  el.appendChild(document.createTextNode(String(message == null ? '' : message)));
-  root.appendChild(el);
-  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('show')));
-  const ms = durationMs != null ? durationMs : (type === 'error' ? 8000 : 4500);
-  el._toastTimer = setTimeout(() => dismissToast(el), ms);
-}
-function dismissToast(el){
-  if (!el || !el.parentNode) return;
-  if (el._toastTimer) clearTimeout(el._toastTimer);
-  el.classList.remove('show');
-  setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 240);
-}
-window.showToast = showToast;
-
-let _modalResolver = null;
-function _closeAppModal(result){
-  const root = document.getElementById('app-modal-root');
-  if (root) root.classList.remove('show');
-  const input = document.getElementById('app-modal-input');
-  if (input) { input.style.display = 'none'; input.value = ''; input.onkeydown = null; }
-  const actions = document.getElementById('app-modal-actions');
-  if (actions) actions.innerHTML = '';
-  const r = _modalResolver;
-  _modalResolver = null;
-  if (r) r(result);
-}
-function showAppModal({ title, body, inputPlaceholder, defaultValue, confirmLabel, cancelLabel, danger }){
-  return new Promise((resolve) => {
-    if (_modalResolver) {
-      try { _modalResolver(inputPlaceholder != null ? null : false); } catch(_){}
-    }
-    _modalResolver = resolve;
-    const root = document.getElementById('app-modal-root');
-    const titleEl = document.getElementById('app-modal-title');
-    const bodyEl = document.getElementById('app-modal-body');
-    const input = document.getElementById('app-modal-input');
-    const actions = document.getElementById('app-modal-actions');
-    if (!root || !titleEl || !bodyEl || !actions) {
-      console.error('[modal missing]', title, body);
-      resolve(inputPlaceholder != null ? null : false);
-      return;
-    }
-    titleEl.textContent = title || '';
-    bodyEl.textContent = body == null ? '' : String(body);
-    actions.innerHTML = '';
-    const isPrompt = inputPlaceholder != null;
-    const isAlert = !cancelLabel && !isPrompt;
-    if (isPrompt) {
-      input.style.display = '';
-      input.placeholder = inputPlaceholder || '';
-      input.value = defaultValue != null ? String(defaultValue) : '';
-      input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); _closeAppModal(input.value); } };
-    } else {
-      input.style.display = 'none';
-      input.value = '';
-      input.onkeydown = null;
-    }
-    if (!isAlert) {
-      const cancelBtn = document.createElement('button');
-      cancelBtn.className = 'btn';
-      cancelBtn.type = 'button';
-      cancelBtn.textContent = cancelLabel || 'Cancel';
-      cancelBtn.onclick = () => _closeAppModal(isPrompt ? null : false);
-      actions.appendChild(cancelBtn);
-    }
-    const okBtn = document.createElement('button');
-    okBtn.className = 'btn' + (danger ? ' danger' : ' primary');
-    okBtn.type = 'button';
-    okBtn.textContent = confirmLabel || 'OK';
-    okBtn.onclick = () => _closeAppModal(isPrompt ? input.value : true);
-    actions.appendChild(okBtn);
-    root.classList.add('show');
-    if (isPrompt) setTimeout(() => input.focus(), 30);
-    else setTimeout(() => okBtn.focus(), 30);
-  });
-}
-async function safeAlert(message, title){
-  await showAppModal({ title: title || 'Notice', body: message, confirmLabel: 'OK' });
-}
-async function safeConfirm(message, title, opts){
-  const r = await showAppModal({
-    title: (opts && opts.title) || title || 'Confirm',
-    body: message,
-    confirmLabel: (opts && opts.confirmLabel) || 'OK',
-    cancelLabel: (opts && opts.cancelLabel) || 'Cancel',
-    danger: !!(opts && opts.danger)
-  });
-  return !!r;
-}
-async function safePrompt(message, defaultValue, title){
-  return await showAppModal({
-    title: title || 'Input',
-    body: message,
-    inputPlaceholder: '',
-    defaultValue: defaultValue != null ? defaultValue : '',
-    confirmLabel: 'OK',
-    cancelLabel: 'Cancel'
-  });
-}
-window.safeAlert = safeAlert;
-window.safeConfirm = safeConfirm;
-window.safePrompt = safePrompt;
-
-window.addEventListener('error', (ev) => {
-  const msg = (ev && ev.message) ? ev.message : 'Unexpected error';
-  console.error('[window.onerror]', ev.error || msg, ev);
-  try { showToast('Something went wrong: ' + msg, 'error', 10000); } catch(_){}
-});
-window.addEventListener('unhandledrejection', (ev) => {
-  const reason = ev && ev.reason;
-  const msg = (reason && reason.message) ? reason.message : String(reason || 'Unhandled promise rejection');
-  console.error('[unhandledrejection]', reason);
-  try { showToast('Something went wrong: ' + msg, 'error', 10000); } catch(_){}
-});
-
 function toggleLoginPasswordVisibility(){  const input = document.getElementById('login-password');
   const btn = document.getElementById('login-pw-toggle');
   const showing = input.type === 'text';
@@ -1217,7 +1072,88 @@ function escapeHtml(s){
     return c;
   });
 }
-// ---- Code-price cipher ----
+// ---- Non-blocking dialogs (replace native alert/confirm) ----
+// Native alert()/confirm() freeze the whole tab — including any spinner or
+// animation already on screen — and never pick up the app's light/dark
+// theme (they're browser chrome, not page content). These keep the exact
+// "pause the calling function until the user responds" semantics — the
+// call site still does `await showAlert(...)` / `await showConfirm(...)`
+// — but only pause that one function, not the whole browser, and they
+// queue automatically so back-to-back calls display one at a time instead
+// of racing or stacking.
+let _dialogQueue = Promise.resolve();
+function _showDialog({ message, title, confirmText, cancelText, isConfirm }) {
+  const run = () => new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dlg-overlay';
+    overlay.innerHTML = `
+      <div class="dlg-box">
+        ${title ? `<div class="dlg-title">${escapeHtml(title)}</div>` : ''}
+        <div class="dlg-msg"></div>
+        <div class="dlg-actions">
+          ${isConfirm ? `<button class="btn" data-act="cancel">${escapeHtml(cancelText || 'Cancel')}</button>` : ''}
+          <button class="btn primary" data-act="ok">${escapeHtml(confirmText || 'OK')}</button>
+        </div>
+      </div>`;
+    overlay.querySelector('.dlg-msg').textContent = message; // textContent (not innerHTML): no HTML injection, and CSS white-space:pre-wrap keeps the \n formatting every existing alert()/confirm() message already relies on
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('show'));
+    const cleanup = (result) => {
+      overlay.classList.remove('show');
+      document.removeEventListener('keydown', onKey);
+      setTimeout(() => overlay.remove(), 200);
+      resolve(result);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') cleanup(false);
+      else if (e.key === 'Enter') cleanup(true);
+    };
+    document.addEventListener('keydown', onKey);
+    overlay.querySelector('[data-act="ok"]').onclick = () => cleanup(true);
+    const cancelBtn = overlay.querySelector('[data-act="cancel"]');
+    if (cancelBtn) cancelBtn.onclick = () => cleanup(false);
+    requestAnimationFrame(() => overlay.querySelector('[data-act="ok"]').focus());
+  });
+  const result = _dialogQueue.then(run);
+  _dialogQueue = result.catch(() => {}); // keep the queue alive even if a caller does something odd with the returned promise
+  return result;
+}
+function showAlert(message, opts) { return _showDialog(Object.assign({ message, isConfirm: false }, opts)); }
+function showConfirm(message, opts) { return _showDialog(Object.assign({ message, isConfirm: true }, opts)); }
+
+// Lightweight auto-dismissing toast — used only by the global error
+// handlers below, for failures nobody explicitly asked to be told about.
+// Explicit alert()/confirm() call sites use showAlert/showConfirm above
+// instead, since those messages need to actually be read and acted on.
+function toast(message, type, duration) {
+  type = type || 'info'; duration = duration || 6000;
+  let host = document.getElementById('toast-host');
+  if (!host) { host = document.createElement('div'); host.id = 'toast-host'; document.body.appendChild(host); }
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = message;
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 250); }, duration);
+}
+
+// ---- Global safety net for silent failures ----
+// An onclick="someAsyncFn()" handler is never awaited by the browser, so if
+// someAsyncFn() throws and nothing inside it catches the error, the failure
+// becomes an "unhandled promise rejection" — invisible unless devtools is
+// open. Button does nothing, nobody knows why. This surfaces it instead.
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('Unhandled promise rejection:', event.reason);
+  try { hideLoading(); } catch (_) {} // in case a loading overlay was left stuck showing
+  const msg = (event.reason && event.reason.message) ? event.reason.message : String(event.reason);
+  toast('Something went wrong: ' + msg, 'error', 7000);
+  event.preventDefault();
+});
+window.addEventListener('error', (event) => {
+  console.error('Uncaught error:', event.error || event.message);
+});
+
+
 // M-I-C-H-A-E-L-S-O-N maps to 1-2-3-4-5-6-7-8-9-0. "Code" here means the
 // coded PRICE of an item, not a coded name — those are different concepts
 // even though both are called "codes" on the floor.
@@ -1361,11 +1297,11 @@ async function syncBrandArchivedFlag(brand, archived){
 async function ctxArchiveBrand(){
   document.getElementById('brand-ctx').style.display = 'none';
   if (ctxTargetBrand == null || !isAdmin) return;
-  if (!confirm(`Archive the ENTIRE ${brandLabel(ctxTargetBrand)} inventory?
+  if (!await showConfirm(`Archive the ENTIRE ${brandLabel(ctxTargetBrand)} inventory?
 
 All its parts will be hidden from the main view (they stay in the database and can be un-archived), and will stop showing in the Owner Lobby.`)) return;
   const typed = prompt(`Type "${brandConfirmToken(ctxTargetBrand)}" to confirm archive:`);
-  if (typed !== brandConfirmToken(ctxTargetBrand)) { alert('Name did not match — cancelled.'); return; }
+  if (typed !== brandConfirmToken(ctxTargetBrand)) { await showAlert('Name did not match — cancelled.'); return; }
   showLoading(`Archiving "${brandLabel(ctxTargetBrand)}"…`);
   const items = await fullScanBrandRecords(STORE, ctxTargetBrand);
   for (const rec of items) {
@@ -1383,12 +1319,12 @@ All its parts will be hidden from the main view (they stay in the database and c
   await refreshInventoryView(true);
   const cloudMsg = await syncBrandArchivedFlag(ctxTargetBrand, true);
   hideLoading();
-  alert(`"${brandLabel(ctxTargetBrand)}" archived.${cloudMsg}`);
+  await showAlert(`"${brandLabel(ctxTargetBrand)}" archived.${cloudMsg}`);
 }
 async function ctxUnarchiveBrand(){
   document.getElementById('brand-ctx').style.display = 'none';
   if (ctxTargetBrand == null || !isAdmin) return;
-  if (!confirm(`Un-archive ${brandLabel(ctxTargetBrand)}? All its parts become visible again, including in the Owner Lobby.`)) return;
+  if (!await showConfirm(`Un-archive ${brandLabel(ctxTargetBrand)}? All its parts become visible again, including in the Owner Lobby.`)) return;
   showLoading(`Un-archiving "${brandLabel(ctxTargetBrand)}"…`);
   const items = await fullScanBrandRecords(STORE, ctxTargetBrand);
   for (const rec of items) {
@@ -1405,7 +1341,7 @@ async function ctxUnarchiveBrand(){
   await refreshInventoryView(true);
   const cloudMsg = await syncBrandArchivedFlag(ctxTargetBrand, false);
   hideLoading();
-  alert(`"${brandLabel(ctxTargetBrand)}" un-archived.${cloudMsg}`);
+  await showAlert(`"${brandLabel(ctxTargetBrand)}" un-archived.${cloudMsg}`);
 }
 async function ctxRenameBrand(){
   document.getElementById('brand-ctx').style.display = 'none';
@@ -1414,10 +1350,10 @@ async function ctxRenameBrand(){
   if (!newName || !newName.trim() || newName.trim() === ctxTargetBrand) return;
   const target = newName.trim();
   if (brands.includes(target) || knownBrands().includes(target) || archivedBrands.has(target) || trashedBrands.has(target)) {
-    alert('A brand with that name already exists.');
+    await showAlert('A brand with that name already exists.');
     return;
   }
-  if (!confirm(`Rename "${brandLabel(ctxTargetBrand)}" → "${target}"? This updates every part, stats, schema and backup for that brand.`)) return;
+  if (!await showConfirm(`Rename "${brandLabel(ctxTargetBrand)}" → "${target}"? This updates every part, stats, schema and backup for that brand.`)) return;
   showLoading(`Renaming "${brandLabel(ctxTargetBrand)}" to "${target}"…`);
 
   // Update all parts
@@ -1498,15 +1434,15 @@ async function ctxRenameBrand(){
     }
   }
   hideLoading();
-  alert(`"${target}" renamed.${cloudMsg}`);
+  await showAlert(`"${target}" renamed.${cloudMsg}`);
 }
 
 async function ctxTrashBrand(){
   document.getElementById('brand-ctx').style.display = 'none';
   if (ctxTargetBrand == null || !isAdmin) return;
-  if (!confirm(`Move the ENTIRE "${brandLabel(ctxTargetBrand)}" brand and all its inventory to Trash?\n\nIt will disappear from normal views and from Sell search. You can restore or permanently delete it later.`)) return;
+  if (!await showConfirm(`Move the ENTIRE "${brandLabel(ctxTargetBrand)}" brand and all its inventory to Trash?\n\nIt will disappear from normal views and from Sell search. You can restore or permanently delete it later.`)) return;
   const typed = prompt(`Type "${brandConfirmToken(ctxTargetBrand)}" to confirm move to Trash:`);
-  if (typed !== brandConfirmToken(ctxTargetBrand)) { alert('Name did not match — cancelled.'); return; }
+  if (typed !== brandConfirmToken(ctxTargetBrand)) { await showAlert('Name did not match — cancelled.'); return; }
 
   showLoading('Moving brand to Trash…');
   try {
@@ -1529,17 +1465,17 @@ async function ctxTrashBrand(){
     await auditWrite('BRAND_TRASHED', { brand: ctxTargetBrand, partCount: items.length });
     const cloudMsg = await syncBrandArchivedFlag(ctxTargetBrand, true);
     hideLoading();
-    alert(`"${brandLabel(ctxTargetBrand)}" moved to Trash (${items.length.toLocaleString()} part(s)). Turn on "Show trash" to see it, or permanently delete it from there.${cloudMsg}`);
+    await showAlert(`"${brandLabel(ctxTargetBrand)}" moved to Trash (${items.length.toLocaleString()} part(s)). Turn on "Show trash" to see it, or permanently delete it from there.${cloudMsg}`);
   } catch (e) {
     hideLoading();
-    alert('Could not move brand to Trash: ' + (e && e.message ? e.message : e));
+    await showAlert('Could not move brand to Trash: ' + (e && e.message ? e.message : e));
   }
 }
 
 async function ctxRestoreBrand(){
   document.getElementById('brand-ctx').style.display = 'none';
   if (ctxTargetBrand == null || !isAdmin || !trashedBrands.has(ctxTargetBrand)) return;
-  if (!confirm(`Restore "${brandLabel(ctxTargetBrand)}" from Trash? It will reappear in the brand list (still archived until you un-archive it).`)) return;
+  if (!await showConfirm(`Restore "${brandLabel(ctxTargetBrand)}" from Trash? It will reappear in the brand list (still archived until you un-archive it).`)) return;
 
   trashedBrands.delete(ctxTargetBrand);
   await metaPut('trashedBrands', Array.from(trashedBrands));
@@ -1551,9 +1487,9 @@ async function ctxRestoreBrand(){
 async function ctxPurgeBrand(){
   document.getElementById('brand-ctx').style.display = 'none';
   if (ctxTargetBrand == null || !isAdmin || !trashedBrands.has(ctxTargetBrand)) return;
-  if (!confirm(`PERMANENTLY DELETE "${brandLabel(ctxTargetBrand)}" and ALL its inventory?\n\nThis cannot be undone. Type the confirmation word to proceed.`)) return;
+  if (!await showConfirm(`PERMANENTLY DELETE "${brandLabel(ctxTargetBrand)}" and ALL its inventory?\n\nThis cannot be undone. Type the confirmation word to proceed.`)) return;
   const typed = prompt(`Type "${brandConfirmToken(ctxTargetBrand)}" to permanently delete:`);
-  if (typed !== brandConfirmToken(ctxTargetBrand)) { alert('Confirmation did not match — cancelled.'); return; }
+  if (typed !== brandConfirmToken(ctxTargetBrand)) { await showAlert('Confirmation did not match — cancelled.'); return; }
 
   const brand = ctxTargetBrand;
   showLoading(`Permanently deleting "${brandLabel(brand)}"…`);
@@ -1604,10 +1540,10 @@ async function ctxPurgeBrand(){
     await auditWrite('BRAND_PURGED', { brand, partCount: nParts, backupCount: nBackup });
     await refreshSyncStatusUI();
     hideLoading();
-    alert(`"${brandLabel(brand)}" permanently deleted (${nParts.toLocaleString()} part(s), ${nBackup.toLocaleString()} backup row(s)).${cloudMsg}`);
+    await showAlert(`"${brandLabel(brand)}" permanently deleted (${nParts.toLocaleString()} part(s), ${nBackup.toLocaleString()} backup row(s)).${cloudMsg}`);
   } catch (e) {
     hideLoading();
-    alert('Could not permanently delete brand: ' + (e && e.message ? e.message : e));
+    await showAlert('Could not permanently delete brand: ' + (e && e.message ? e.message : e));
   }
 }
 
@@ -1773,7 +1709,7 @@ async function saveEditedPart(id){
     const previous = { name: rec.name, qty: rec.qty, price: rec.price, code: rec.code };
     const ok = await submitPendingApproval('edit', payload, partSyncKey(rec), previous);
     editingId = null;
-    if (ok) alert('Submitted — the Owner will need to approve this before it takes effect.');
+    if (ok) await showAlert('Submitted — the Owner will need to approve this before it takes effect.');
     await refreshInventoryView(false);
     return;
   }
@@ -1827,7 +1763,7 @@ async function restorePartFlag(id){
 async function deletePart(id){
   const rec = await dbGetById(id);
   if (!rec) return;
-  if (!confirm(`Permanently delete "${rec.name}" (${rec.part})? This can't be undone — archive instead if you might need it again.`)) return;
+  if (!await showConfirm(`Permanently delete "${rec.name}" (${rec.part})? This can't be undone — archive instead if you might need it again.`)) return;
   if (!rec.archived) { statsBump(rec.brand, -rec.qty, -rec.qty*rec.cost, -rec.qty*rec.price, -1); await persistStats(); }
   await dbDelete(id);
   await enqueuePartDeleteSync(rec);
@@ -1878,7 +1814,7 @@ async function savePart(){
     // Cashier: this goes to the Owner as a request. Local inventory and
     // Firestore both stay untouched until it's approved.
     const ok = await submitPendingApproval('add', { brand, part, name: desc, qty, price: sell, code, extra }, null, null);
-    if (ok) { alert('Submitted — the Owner will need to approve this before the part is added.'); showPanel('inventory'); }
+    if (ok) { await showAlert('Submitted — the Owner will need to approve this before the part is added.'); showPanel('inventory'); }
     return;
   }
 
@@ -2157,10 +2093,10 @@ function populateAddColumnPicker(){
   }
   sel.innerHTML = opts.join('');
 }
-function addMappingColumn(){
+async function addMappingColumn(){
   const colIdx = parseInt(document.getElementById('imp-add-col-select').value,10);
   if (isNaN(colIdx)) return;
-  if (importMappings.some(m=>m.colIdx===colIdx)) { alert('That column is already mapped.'); return; }
+  if (importMappings.some(m=>m.colIdx===colIdx)) { await showAlert('That column is already mapped.'); return; }
   const header = (importGrid[importHeaderRow]&&importGrid[importHeaderRow][colIdx]!=null) ? String(importGrid[importHeaderRow][colIdx]) : '';
   importMappings.push({ colIdx, header, label: guessImportLabel(header) });
   renderImportMappingRows();
@@ -2198,7 +2134,7 @@ function validateMappings(){
 async function importReview(){
   validateMappings();
   const partCol = importMappings.find(m => resolveFieldType(m.label)==='Part No.');
-  if (!partCol) { alert('You need exactly one column mapped to Part No.'); return; }
+  if (!partCol) { await showAlert('You need exactly one column mapped to Part No.'); return; }
   const descCol = importMappings.find(m => resolveFieldType(m.label)==='Description');
   const costCol = importMappings.find(m => resolveFieldType(m.label)==='Cost Price');
   const priceCol = importMappings.find(m => resolveFieldType(m.label)==='Sell Price');
@@ -2405,20 +2341,35 @@ async function backupNextPage(){ backupPageState.pageIndex++; await refreshBacku
 async function backupPrevPage(){ if (backupPageState.pageIndex>0) { backupPageState.pageIndex--; await refreshBackupView(false); } }
 async function restoreBackup(brand){
   const info = await metaGet('backupInfo:'+brand);
-  if (!info) { alert('No backup available for ' + brand + '.'); return; }
-  if (!confirm(`Swap ${brand}'s current data with its previous backup? You can restore again afterward to swap back.`)) return;
+  if (!info) { await showAlert('No backup available for ' + brand + '.'); return; }
+  if (!await showConfirm(`Swap ${brand}'s current data with its previous backup? You can restore again afterward to swap back.`)) return;
   const typed = prompt(`Type "${brand}" to confirm restore:`);
-  if (typed !== brand) { alert('Name did not match — cancelled.'); return; }
+  if (typed !== brand) { await showAlert('Name did not match — cancelled.'); return; }
   const currentItems = await fullScanBrandRecords(STORE, brand);
   const currentSchema = (await metaGet('schema:'+brand)) || [];
   const backupItems = await fullScanBrandRecords(BACKUP_STORE, brand);
   const backupSchema = info.schemaBefore || [];
-  await deleteBrandRecords(STORE, brand);
-  await deleteBrandRecords(BACKUP_STORE, brand);
-  await bulkPutInto(BACKUP_STORE, currentItems);
-  await bulkPutInto(STORE, backupItems);
-  await metaPut('schema:'+brand, backupSchema);
-  await metaPut('backupInfo:'+brand, { snapshotAt: Date.now(), schemaBefore: currentSchema, dismissed: false });
+  // Not a single atomic transaction — if a step here throws partway through,
+  // the swap is half-done (old data deleted, new data not fully written).
+  // That's a materially worse failure than "the button didn't work", so it
+  // gets its own message instead of relying on the generic global handler.
+  try {
+    await deleteBrandRecords(STORE, brand);
+    await deleteBrandRecords(BACKUP_STORE, brand);
+    await bulkPutInto(BACKUP_STORE, currentItems);
+    await bulkPutInto(STORE, backupItems);
+    await metaPut('schema:'+brand, backupSchema);
+    await metaPut('backupInfo:'+brand, { snapshotAt: Date.now(), schemaBefore: currentSchema, dismissed: false });
+  } catch (e) {
+    await rebuildStatsCache(); await persistStats();
+    await refreshBrandBackupBanner();
+    await refreshInventoryView(true);
+    await showAlert(
+      `Restore for "${brand}" failed partway through: ${e && e.message ? e.message : e}\n\n` +
+      `This brand's data may now be in a mixed state (part old, part backup) — check Inventory for "${brand}" before selling anything, and export a full backup now if it looks wrong.`
+    );
+    return;
+  }
   await rebuildStatsCache(); await persistStats();
   if (activeBrand === brand) activeBrandSchema = backupSchema;
   await refreshBrandBackupBanner();
@@ -2565,7 +2516,7 @@ async function ensureBranchIdSet(){
   if (!id) return null;
   const clean = id.trim().toLowerCase().replace(/[^a-z0-9-]/g,'-');
   if (!clean) return null;
-  if (!confirm(`Assign this device to branch "${clean}"? All sales and stock on this device will sync under that branch from now on.`)) return null;
+  if (!await showConfirm(`Assign this device to branch "${clean}"? All sales and stock on this device will sync under that branch from now on.`)) return null;
   await metaPut('branchId', clean);
   _branchId = clean;
   await auditWrite('BRANCH_ASSIGNED', { branchId: clean });
@@ -2587,7 +2538,7 @@ async function pullBranchFromFirestore(branchId){
     // index" link instead). costErrorCode is the actual way to tell:
     // 'permission-denied' means check the rules, 'failed-precondition'
     // means it really is an index — check the browser console for it.
-    alert(`Warning: cost data couldn't be read while pulling this branch${costErrorCode ? ` [${costErrorCode}]` : ''} (${costError}).\n\nEvery part is being seeded with cost = 0 as a result. Check the browser console (F12) for the full error and its code, then pull again once it's resolved.`);
+    await showAlert(`Warning: cost data couldn't be read while pulling this branch${costErrorCode ? ` [${costErrorCode}]` : ''} (${costError}).\n\nEvery part is being seeded with cost = 0 as a result. Check the browser console (F12) for the full error and its code, then pull again once it's resolved.`);
   }
   const records = [];
   partsSnap.forEach(d => {
@@ -2610,7 +2561,7 @@ async function resolveDeviceBranch(accountBranchId){
       const records = await pullBranchFromFirestore(accountBranchId);
       if (records.length) { await dbBulkPut(records); await rebuildStatsCache(); await persistStats(); }
     } catch (e) {
-      alert(`Branch assigned, but could not pull ${accountBranchId}'s data yet: ${e.message}\nYou can keep working — it will sync normally once this succeeds.`);
+      await showAlert(`Branch assigned, but could not pull ${accountBranchId}'s data yet: ${e.message}\nYou can keep working — it will sync normally once this succeeds.`);
     }
     return;
   }
@@ -2619,12 +2570,12 @@ async function resolveDeviceBranch(accountBranchId){
   // case. Never switch silently: confirm, back up first, then check for
   // unsynced work that switching would strand.
   const pending = (await getPendingSyncOps()).length;
-  const proceed = confirm(
+  const proceed = await showConfirm(
     `This device is currently set up for branch "${localBranchId}", but your account belongs to "${accountBranchId}".\n\n` +
     (pending ? `WARNING: ${pending} change(s) on this device have not synced yet. Switching now risks losing them — connect to the internet and let it sync first if possible.\n\n` : '') +
     `Continuing will REPLACE this device's local data with "${accountBranchId}"'s data from Firestore. A safety backup of the current data will download first. Continue?`
   );
-  if (!proceed) { alert('Branch switch cancelled — reloading.'); location.reload(); throw new Error('Branch switch cancelled'); }
+  if (!proceed) { await showAlert('Branch switch cancelled — reloading.'); location.reload(); throw new Error('Branch switch cancelled'); }
 
   try {
     const dump = { version:1, exportedAt: Date.now(), safetySnapshotBeforeBranchSwitch: true, stores: {} };
@@ -2643,8 +2594,8 @@ async function resolveDeviceBranch(accountBranchId){
     a.download = `motofix-SAFETY-before-branch-switch-${localBranchId}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
     document.body.appendChild(a); a.click(); a.remove();
   } catch (e) {
-    if (!confirm('Could not create the automatic safety backup (' + e.message + '). Continue WITHOUT one anyway? Not recommended.')) {
-      alert('Branch switch cancelled — reloading.'); location.reload();
+    if (!await showConfirm('Could not create the automatic safety backup (' + e.message + '). Continue WITHOUT one anyway? Not recommended.')) {
+      await showAlert('Branch switch cancelled — reloading.'); location.reload();
       throw new Error('Branch switch cancelled');
     }
   }
@@ -2658,7 +2609,7 @@ async function resolveDeviceBranch(accountBranchId){
     const records = await pullBranchFromFirestore(accountBranchId);
     if (records.length) await dbBulkPut(records);
   } catch (e) {
-    alert(`Switched to ${accountBranchId}, but could not pull its data yet: ${e.message}`);
+    await showAlert(`Switched to ${accountBranchId}, but could not pull its data yet: ${e.message}`);
   }
   await rebuildStatsCache(); await persistStats();
 }
@@ -2690,7 +2641,7 @@ async function submitPendingApproval(type, payload, targetKey, previous){
   // records a request. Nothing about stock/price actually changes until
   // an Owner approves it AND this device notices and applies it.
   const branchId = await getBranchId();
-  if (!branchId) { alert('This device has no branch assigned yet — ask an Admin to set one before adding or editing parts.'); return false; }
+  if (!branchId) { await showAlert('This device has no branch assigned yet — ask an Admin to set one before adding or editing parts.'); return false; }
   const id = genOpId();
   const fbUser = window.__currentFirebaseUser;
   const req = {
@@ -2765,7 +2716,7 @@ async function checkMyApprovals(silent){
       if (reqDoc.status === 'approved') {
         await applyApprovedRequest(reqDoc);
       } else if (reqDoc.status === 'rejected' && !silent) {
-        alert(`Your request to ${reqDoc.type==='add'?'add':'edit'} "${(reqDoc.payload||{}).brand||''} / ${(reqDoc.payload||{}).part||''}" was rejected by the Owner.${reqDoc.reviewNote ? ' Note: ' + reqDoc.reviewNote : ''}`);
+        await showAlert(`Your request to ${reqDoc.type==='add'?'add':'edit'} "${(reqDoc.payload||{}).brand||''} / ${(reqDoc.payload||{}).part||''}" was rejected by the Owner.${reqDoc.reviewNote ? ' Note: ' + reqDoc.reviewNote : ''}`);
       }
       try { await setDoc(doc(dbFs,'branches',branchId,'pendingApprovals',reqDoc.id), { applied: true }, { merge: true }); } catch(e) { console.warn(e); }
       const mine = (await metaGet('myPendingApprovals')) || [];
@@ -2945,13 +2896,13 @@ async function manualSyncNowImpl(){
   // there was nothing queued — indistinguishable from "broken" to anyone
   // looking at it. It should always give a real, visible answer.
   if (!isAdmin) return;
-  if (!navigator.onLine) { alert('Can\u2019t sync right now — this device is offline.'); return; }
-  if (!window.__fsSync) { alert('Can\u2019t sync — Firestore didn\u2019t load in this browser. Reload the page; if it keeps happening, this domain likely isn\u2019t in Firebase Auth\u2019s authorized domains list yet.'); return; }
+  if (!navigator.onLine) { await showAlert('Can\u2019t sync right now — this device is offline.'); return; }
+  if (!window.__fsSync) { await showAlert('Can\u2019t sync — Firestore didn\u2019t load in this browser. Reload the page; if it keeps happening, this domain likely isn\u2019t in Firebase Auth\u2019s authorized domains list yet.'); return; }
   const branchId = await getBranchId();
-  if (!branchId) { alert('This device has no branch assigned yet — set one in Accounts first.'); return; }
+  if (!branchId) { await showAlert('This device has no branch assigned yet — set one in Accounts first.'); return; }
   const before = await getPendingSyncOps();
   if (!before.length) {
-    alert('Nothing to sync — this device has no pending changes right now.\n\nIf data still looks wrong in Owner Lobby, that\u2019s not something this button fixes: it only pushes NEW local changes. Already-broken records already sitting in Firestore need "Push new parts to Firestore" (Accounts tab), or re-running the import that set the wrong values.');
+    await showAlert('Nothing to sync — this device has no pending changes right now.\n\nIf data still looks wrong in Owner Lobby, that\u2019s not something this button fixes: it only pushes NEW local changes. Already-broken records already sitting in Firestore need "Push new parts to Firestore" (Accounts tab), or re-running the import that set the wrong values.');
     return;
   }
   await processSyncQueue(false);
@@ -2959,13 +2910,13 @@ async function manualSyncNowImpl(){
   const stillStuck = after.filter(o => (o.retryCount||0) > 0).length;
   const cleared = before.length - after.length;
   if (stillStuck && cleared === 0) {
-    alert(`Ran, but nothing went through — all ${stillStuck} pending operation(s) failed again. Tap the sync status line above for the actual error and details.`);
+    await showAlert(`Ran, but nothing went through — all ${stillStuck} pending operation(s) failed again. Tap the sync status line above for the actual error and details.`);
   } else if (stillStuck) {
-    alert(`Synced ${cleared} change(s). ${stillStuck} still stuck and failing — tap the sync status line above for details.`);
+    await showAlert(`Synced ${cleared} change(s). ${stillStuck} still stuck and failing — tap the sync status line above for details.`);
   } else if (after.length) {
-    alert(`Synced ${cleared} change(s). ${after.length} more still queued — they'll go out shortly (auto-sync retries every 20s), or tap Sync now again.`);
+    await showAlert(`Synced ${cleared} change(s). ${after.length} more still queued — they'll go out shortly (auto-sync retries every 20s), or tap Sync now again.`);
   } else {
-    alert(`Synced ${cleared} change(s). Everything's caught up.`);
+    await showAlert(`Synced ${cleared} change(s). Everything's caught up.`);
   }
 }
 async function processSyncQueue(auto){
@@ -3186,7 +3137,7 @@ async function viewSyncDiagnostics(){
   let msg = lines.join('\n');
   if (stuck.length) {
     msg += `\n\nPress OK to permanently DISCARD the ${stuck.length} stuck operation(s) above (only do this once you understand why they failed \u2014 they'll never be retried again), or Cancel to leave everything as-is.`;
-    const wipe = confirm(msg);
+    const wipe = await showConfirm(msg);
     if (!wipe) return;
     const db = await openDB();
     await new Promise((res,rej) => {
@@ -3196,9 +3147,9 @@ async function viewSyncDiagnostics(){
       t.oncomplete = res; t.onerror = () => rej(t.error);
     });
     await refreshSyncStatusUI();
-    alert(`Discarded ${stuck.length} stuck operation(s).`);
+    await showAlert(`Discarded ${stuck.length} stuck operation(s).`);
   } else {
-    alert(msg);
+    await showAlert(msg);
   }
 }
 window.addEventListener('online', () => { refreshSyncStatusUI(); if (autoSyncEnabled) processSyncQueue(true); checkMyApprovals(true); });
@@ -3209,8 +3160,8 @@ setInterval(() => { checkMyApprovals(true); }, 60000); // cheap single-equality 
 async function pushBranchBaseline(){
   if (!isAdmin) return;
   const branchId = await getBranchId();
-  if (!branchId) { alert('Assign this device to a branch first.'); return; }
-  if (!window.__fsSync) { alert('Firestore not available.'); return; }
+  if (!branchId) { await showAlert('Assign this device to a branch first.'); return; }
+  if (!window.__fsSync) { await showAlert('Firestore not available.'); return; }
   const db = await openDB();
   const parts = await new Promise((res,rej)=>{
     const rows=[]; const req = db.transaction(STORE,'readonly').objectStore(STORE).openCursor();
@@ -3228,7 +3179,7 @@ async function pushBranchBaseline(){
     snap.forEach(d => existingMap.set(d.id, d.data()));
   } catch (e) {
     hideLoading();
-    alert('Could not check existing Firestore data: ' + (e && e.message ? e.message : e));
+    await showAlert('Could not check existing Firestore data: ' + (e && e.message ? e.message : e));
     return;
   }
   // Four buckets: brand new (not in Firestore at all), ghost/incomplete
@@ -3251,10 +3202,10 @@ async function pushBranchBaseline(){
   hideLoading();
 
   if (!toPush.length && !reactivate.length) {
-    alert(`Nothing to push — every active part on this device already exists as a complete, active record in Firestore for branch "${branchId}".\n\nThis button only adds parts that aren't there yet, repairs incomplete records, or reactivates ones stuck marked archived; it never touches anything else (that stays in sync automatically through normal use).`);
+    await showAlert(`Nothing to push — every active part on this device already exists as a complete, active record in Firestore for branch "${branchId}".\n\nThis button only adds parts that aren't there yet, repairs incomplete records, or reactivates ones stuck marked archived; it never touches anything else (that stays in sync automatically through normal use).`);
     return;
   }
-  const proceed = confirm(
+  const proceed = await showConfirm(
     `${brandNew.length} new part(s), ${repairs.length} incomplete/ghost record(s) to repair, ${reactivate.length} stuck-archived record(s) to reactivate ` +
     `(out of ${active.length} active parts total; ${untouchedCount} already fine in Firestore will be left untouched).\n\n` +
     `Push these ${toPush.length + reactivate.length}?`
@@ -3292,7 +3243,7 @@ async function pushBranchBaseline(){
     await setDoc(doc(dbFs, 'branches', branchId), { name: branchId, lastSeededAt: serverTimestamp() }, { merge: true });
   } catch (e) {
     hideLoading();
-    alert(
+    await showAlert(
       `Stopped after ${count} of ${totalOps} — this write was rejected.\n\n` +
       `Error: ${e.message}\n\n` +
       `Most likely cause: your account's own users/{uid} doc has a branchId that doesn't exactly match "${branchId}" ` +
@@ -3305,7 +3256,7 @@ async function pushBranchBaseline(){
   hideLoading();
   await auditWrite('BASELINE_PUSHED', { branchId, newPartCount: brandNew.length, repairedCount: repairs.length, reactivatedCount: reactivate.length, alreadyComplete: untouchedCount });
   await metaPut('lastBaselineSeedAt', Date.now());
-  alert(`Done. ${brandNew.length} new part(s) added, ${repairs.length} incomplete record(s) repaired, ${reactivate.length} stuck-archived record(s) reactivated. ${untouchedCount} part(s) already fine in Firestore were left exactly as they were.`);
+  await showAlert(`Done. ${brandNew.length} new part(s) added, ${repairs.length} incomplete record(s) repaired, ${reactivate.length} stuck-archived record(s) reactivated. ${untouchedCount} part(s) already fine in Firestore were left exactly as they were.`);
 }
 async function refreshBranchAccountsUI(){
   const el = document.getElementById('branch-setup-info');
@@ -3349,7 +3300,7 @@ async function doPullFromFirestore(silent){
     changedDocs = new Map();
     snap.forEach(d => changedDocs.set(d.id, d.data()));
   } catch (e) {
-    if (!silent) { hideLoading(); alert('Could not read Firestore: ' + (e && e.message ? e.message : e)); }
+    if (!silent) { hideLoading(); await showAlert('Could not read Firestore: ' + (e && e.message ? e.message : e)); }
     else console.warn('Background pull failed:', e);
     return null;
   }
@@ -3380,7 +3331,7 @@ async function doPullFromFirestore(silent){
   }
 
   if (!toUpdate.length) {
-    if (!silent) { hideLoading(); alert('Already up to date — Firestore has nothing newer than what this device already shows.'); }
+    if (!silent) { hideLoading(); await showAlert('Already up to date — Firestore has nothing newer than what this device already shows.'); }
     await metaPut('lastPullAt', Date.now());
     return { updated: 0, units: 0 };
   }
@@ -3395,7 +3346,7 @@ async function doPullFromFirestore(silent){
   if (!silent) {
     hideLoading();
     const fieldsNote = fieldsChangedCount ? ` ${fieldsChangedCount.toLocaleString()} part(s) also had price/name/code changes brought in.` : '';
-    alert(`Updated ${toUpdate.length.toLocaleString()} part(s) — ${qtyUnitsChanged.toLocaleString()} total unit(s) of quantity brought in from other devices' activity.${fieldsNote}\n\nNote: cost is still not part of this pull (it lives in a separate, Admin-only record) — use "Compare with Firestore" to check cost specifically.`);
+    await showAlert(`Updated ${toUpdate.length.toLocaleString()} part(s) — ${qtyUnitsChanged.toLocaleString()} total unit(s) of quantity brought in from other devices' activity.${fieldsNote}\n\nNote: cost is still not part of this pull (it lives in a separate, Admin-only record) — use "Compare with Firestore" to check cost specifically.`);
   }
   return { updated: toUpdate.length, units: qtyUnitsChanged };
 }
@@ -3408,12 +3359,12 @@ async function pullLatestFromFirestore(){
   // place holding the true combined total; this pulls it back down.
   if (!isAdmin) return;
   const branchId = await getBranchId();
-  if (!branchId) { alert('Assign this device to a branch first.'); return; }
-  if (!window.__fsSync) { alert('Firestore not available.'); return; }
+  if (!branchId) { await showAlert('Assign this device to a branch first.'); return; }
+  if (!window.__fsSync) { await showAlert('Firestore not available.'); return; }
 
   const pending = await getPendingSyncOps();
   if (pending.length) {
-    const push = confirm(
+    const push = await showConfirm(
       `This device has ${pending.length} local change(s) not yet pushed to Firestore. ` +
       `Pulling now without pushing first risks losing them — Firestore doesn't know about them yet, so pulling would overwrite this device's local numbers with older ones.\n\n` +
       `Press OK to push those changes first, then pull (recommended), or Cancel to stop.`
@@ -3422,7 +3373,7 @@ async function pullLatestFromFirestore(){
     await processSyncQueue(false);
     const stillPending = await getPendingSyncOps();
     if (stillPending.length) {
-      alert(`${stillPending.length} change(s) still couldn't push (tap the sync status line for why). Stopping here rather than risk overwriting them — fix that first, then pull again.`);
+      await showAlert(`${stillPending.length} change(s) still couldn't push (tap the sync status line for why). Stopping here rather than risk overwriting them — fix that first, then pull again.`);
       return;
     }
   }
@@ -3461,8 +3412,8 @@ async function compareAdminVsFirestore(){
   // differ and how — no more counting two aggregate numbers and inferring.
   if (!isAdmin) return;
   const branchId = await getBranchId();
-  if (!branchId) { alert('Assign this device to a branch first.'); return; }
-  if (!window.__fsSync) { alert('Firestore not available.'); return; }
+  if (!branchId) { await showAlert('Assign this device to a branch first.'); return; }
+  if (!window.__fsSync) { await showAlert('Firestore not available.'); return; }
   showLoading('Comparing this device against Firestore\u2026');
   const db = await openDB();
   const localParts = await new Promise((res,rej)=>{
@@ -3481,7 +3432,7 @@ async function compareAdminVsFirestore(){
     snap.forEach(d => fsMap.set(d.id, d.data()));
   } catch (e) {
     hideLoading();
-    alert('Could not read Firestore for comparison: ' + (e && e.message ? e.message : e));
+    await showAlert('Could not read Firestore for comparison: ' + (e && e.message ? e.message : e));
     return;
   }
   const { map: fsCostMap, error: costError, code: costErrorCode } = await getOwnerCostMap(branchId);
@@ -3544,7 +3495,7 @@ async function compareAdminVsFirestore(){
 
   console.log('Full comparison:', { missing, incomplete, stuckArchived, priceDiff, qtyDiff, costDiff, localArchivedButFsNot, costError, costErrorCode });
   lines.push('', 'Full lists logged to the browser console (F12 → Console) if you need every item, not just the first 5 of each.');
-  alert(lines.join('\n'));
+  await showAlert(lines.join('\n'));
 }
 async function runBranchDiagnostics(){
   showLoading('Running diagnostics…');
@@ -3554,7 +3505,7 @@ async function runBranchDiagnostics(){
   const deviceBranchId = await getBranchId();
   out.push(`This device's assigned branchId: ${deviceBranchId || '(none set — assign one first)'}`);
 
-  if (!window.__fsSync || !fb) { hideLoading(); alert(out.join('\n')); return; }
+  if (!window.__fsSync || !fb) { hideLoading(); await showAlert(out.join('\n')); return; }
   const { dbFs, doc, getDoc, setDoc, deleteDoc } = window.__fsSync;
 
   try {
@@ -3589,7 +3540,7 @@ async function runBranchDiagnostics(){
   }
 
   hideLoading();
-  alert(out.join('\n\n'));
+  await showAlert(out.join('\n\n'));
   console.log(out.join('\n'));
 }
 // UI wrapper around completeSaleImpl(): shakes the button on an invalid
@@ -3646,7 +3597,7 @@ async function completeSaleImpl(){
   });
   if (shortfalls.length) {
     const msg = shortfalls.map(l => `${l.name}: have ${recMap[l.id]?recMap[l.id].qty:0}, selling ${l.qty}`).join('\n');
-    const ok = confirm(`This sale would push stock negative:\n\n${msg}\n\nOverride and complete anyway? (This will be logged.)`);
+    const ok = await showConfirm(`This sale would push stock negative:\n\n${msg}\n\nOverride and complete anyway? (This will be logged.)`);
     if (!ok) return false;
   }
 
@@ -3708,9 +3659,9 @@ async function completeSaleImpl(){
   return true;
 }
 async function undoLastSale(){
-  if (!lastCompletedSale || lastCompletedSale.voided) { alert('Nothing to undo.'); return; }
-  if (Date.now() - lastCompletedSale.at > UNDO_WINDOW_MS) { alert('Undo window (5 min) has passed. Use Void from History instead.'); return; }
-  if (!confirm(`Undo sale ${lastCompletedSale.id}? Stock will be restored.`)) return;
+  if (!lastCompletedSale || lastCompletedSale.voided) { await showAlert('Nothing to undo.'); return; }
+  if (Date.now() - lastCompletedSale.at > UNDO_WINDOW_MS) { await showAlert('Undo window (5 min) has passed. Use Void from History instead.'); return; }
+  if (!await showConfirm(`Undo sale ${lastCompletedSale.id}? Stock will be restored.`)) return;
   await voidSale(lastCompletedSale.id);
   lastCompletedSale = null;
 }
@@ -3745,9 +3696,9 @@ async function deleteVoidedSale(saleId){
   if (!isAdmin) return;
   const sale = histData.find(s => s.id === saleId);
   if (!sale || !sale.voided) return;
-  if (!confirm(`Permanently delete voided sale ${saleId} from History?\n\nThis cannot be undone. The audit log entry remains.`)) return;
+  if (!await showConfirm(`Permanently delete voided sale ${saleId} from History?\n\nThis cannot be undone. The audit log entry remains.`)) return;
   const typed = prompt(`Type the sale ID "${saleId}" to confirm permanent delete:`);
-  if (typed !== saleId) { alert('ID did not match — cancelled.'); return; }
+  if (typed !== saleId) { await showAlert('ID did not match — cancelled.'); return; }
   histData = histData.filter(s => s.id !== saleId);
   await metaPut('hist', histData);
   await auditWrite('DELETE_VOIDED', { id: saleId, total: sale.total });
@@ -3757,7 +3708,7 @@ async function voidSale(saleId){
   if (!isAdmin) return;
   const sale = histData.find(s => s.id === saleId);
   if (!sale || sale.voided) return;
-  if (!confirm(`Void sale ${saleId}? Stock will be restored and profit reversed.`)) return;
+  if (!await showConfirm(`Void sale ${saleId}? Stock will be restored and profit reversed.`)) return;
   const db = await openDB();
   const recBefore = {};
   for (const line of (sale.lines||[])) recBefore[line.id] = await dbGetById(line.id);
@@ -3929,9 +3880,9 @@ function lowStockBadge(qty){
   return '';
 }
 async function bulkAdjustPrice(brand, mode, value){
-  if (brand === 'All') { alert('Pick a specific brand tab first — bulk adjust applies to one brand at a time.'); return; }
+  if (brand === 'All') { await showAlert('Pick a specific brand tab first — bulk adjust applies to one brand at a time.'); return; }
   if (isNaN(value)) return;
-  if (!confirm(`Apply ${mode==='pct'?value+'%':'₱'+value} to sell price on ALL ${brand} items? This can't be undone automatically (restore from backup if needed).`)) return;
+  if (!await showConfirm(`Apply ${mode==='pct'?value+'%':'₱'+value} to sell price on ALL ${brand} items? This can't be undone automatically (restore from backup if needed).`)) return;
   const items = await fullScanBrandRecords(STORE, brand);
   const changed = [];
   for (const rec of items) {
@@ -3949,7 +3900,7 @@ async function bulkAdjustPrice(brand, mode, value){
   for (const rec of changed) await enqueuePriceSync(rec);
   await auditWrite('BULK_PRICE', { brand, mode, value, itemsAffected: items.length });
   await refreshInventoryView(true);
-  alert(`Updated sell price on ${items.length.toLocaleString()} ${brand} item(s).${changed.length ? ` ${changed.length.toLocaleString()} price change(s) queued for branch sync.` : ''}`);
+  await showAlert(`Updated sell price on ${items.length.toLocaleString()} ${brand} item(s).${changed.length ? ` ${changed.length.toLocaleString()} price change(s) queued for branch sync.` : ''}`);
 }
 async function exportFullDB(){
   showLoading('Preparing backup…');
@@ -4050,7 +4001,7 @@ async function importFullDB(file){
   showLoading('Reading backup file…');
   const text = await file.text();
   let dump;
-  try { dump = JSON.parse(text); } catch(e){ hideLoading(); alert('Not a valid backup file.'); return; }
+  try { dump = JSON.parse(text); } catch(e){ hideLoading(); await showAlert('Not a valid backup file.'); return; }
 
   // Show exactly what's about to be overwritten and what's coming in, so
   // "Continue?" isn't a blind guess.
@@ -4068,7 +4019,7 @@ async function importFullDB(file){
   const summarize = (counts) => Object.entries(counts).map(([k,v]) => `${k}: ${v.toLocaleString()}`).join(', ') || '(empty)';
   hideLoading(); // hide before the native confirm dialog — the spinner shouldn't sit frozen behind a blocking browser prompt
 
-  const proceed = confirm(
+  const proceed = await showConfirm(
     `This REPLACES ALL current data with the backup file.\n\n` +
     `Current data (will be lost unless you cancel now):\n${summarize(currentCounts)}\n\n` +
     `Backup file dated ${dump.exportedAt ? new Date(dump.exportedAt).toLocaleString() : 'unknown'} contains:\n${summarize(incomingCounts)}\n\n` +
@@ -4099,13 +4050,13 @@ async function importFullDB(file){
     document.body.appendChild(a); a.click(); a.remove();
   } catch (e) {
     hideLoading();
-    if (!confirm('Could not create the automatic safety backup (' + e.message + '). Continue WITHOUT a safety copy anyway? This is not recommended.')) return;
+    if (!await showConfirm('Could not create the automatic safety backup (' + e.message + '). Continue WITHOUT a safety copy anyway? This is not recommended.')) return;
     showLoading('Restoring…');
   }
   hideLoading(); // hide before the typed-confirmation prompt, same reason as above
 
   const typed = prompt(`Type RESTORE-${Object.values(incomingCounts).reduce((a,b)=>a+b,0)} to confirm (this number is the total rows in the file you are loading):`);
-  if (typed !== `RESTORE-${Object.values(incomingCounts).reduce((a,b)=>a+b,0)}`) { alert('Confirmation text did not match — cancelled. Nothing was changed.'); return; }
+  if (typed !== `RESTORE-${Object.values(incomingCounts).reduce((a,b)=>a+b,0)}`) { await showAlert('Confirmation text did not match — cancelled. Nothing was changed.'); return; }
 
   showLoading('Restoring backup…');
   for (const [name, rows] of Object.entries(dump.stores||{})) {
@@ -4571,7 +4522,7 @@ async function reviewApproval(id, decision){
       reviewNote
     }, { merge: true });
   } catch(e) {
-    alert('Could not save decision: ' + (e && e.message ? e.message : e));
+    await showAlert('Could not save decision: ' + (e && e.message ? e.message : e));
     return;
   }
   ownerCachedApprovals = ownerCachedApprovals.filter(r => r.id !== id);
@@ -4697,11 +4648,11 @@ window.__bootMotoFix = boot; // called by the auth module below once login succe
     try {
       await sendPasswordResetEmail(auth, email);
       window.hideLoading();
-      alert(`If ${email} has an account, a password reset link was just sent to it. Check your inbox (and spam folder).`);
+      await showAlert(`If ${email} has an account, a password reset link was just sent to it. Check your inbox (and spam folder).`);
     } catch (e) {
       window.hideLoading();
       // Same deliberately-vague pattern as login failures — don't reveal whether the email exists.
-      alert(`If ${email} has an account, a password reset link was just sent to it. Check your inbox (and spam folder).`);
+      await showAlert(`If ${email} has an account, a password reset link was just sent to it. Check your inbox (and spam folder).`);
       console.warn('Password reset request:', e.message);
     }
   };
