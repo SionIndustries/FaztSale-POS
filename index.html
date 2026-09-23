@@ -105,7 +105,8 @@
   .badge.archived{background:var(--line); color:var(--steel-2);}
   .banner{border-radius:8px; padding:12px 14px; font-size:13px; margin-bottom:14px;}
   .banner.warn{background:var(--warn-bg); border:1px solid var(--warn-border); color:var(--warn-text);}
-  .banner.success{background:var(--green-bg); border:1px solid var(--green); color:#2D5A38;}
+  .banner.success{background:var(--green-bg); border:1px solid var(--green); color:var(--green);}
+  .banner.danger{background:var(--red-bg); border:1px solid var(--red); color:var(--red);}
   .metric-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:18px;}
   .metric{background:var(--paper); border-radius:8px; padding:12px;}
   .metric .label{font-family:'Courier New',Consolas,monospace; font-size:10px; color:var(--steel-2); text-transform:uppercase;}
@@ -352,7 +353,7 @@ const CLIENT_CONFIG = {
   <section class="panel" id="panel-inventory">
     <div class="metric-grid admin-only" style="grid-template-columns:1fr 1fr;">
       <div class="metric"><div class="label">Stock value (at cost) — this sheet</div><div class="val" id="inv-cost-total">₱ 0</div></div>
-      <div class="metric" style="background:var(--green-bg);"><div class="label" style="color:#2D5A38;">Potential revenue — this sheet</div><div class="val" style="color:#2D5A38;" id="inv-rev-total">₱ 0</div></div>
+      <div class="metric" style="background:var(--green-bg);"><div class="label" style="color:var(--green);">Potential revenue — this sheet</div><div class="val" style="color:var(--green);" id="inv-rev-total">₱ 0</div></div>
     </div>
     <div style="display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;">
       <input type="text" id="inv-search" placeholder="Search part no. or description (this sheet)" style="flex:1; min-width:160px;" oninput="onInvSearchInput(this.value)">
@@ -513,7 +514,7 @@ const CLIENT_CONFIG = {
       <button class="btn primary" style="width:100%; margin-top:12px;" onclick="resetImport(); showPanel('inventory')">Done — back to Inventory</button>
     </div>
     <div id="imp-step-error" style="display:none;">
-      <div class="banner warn" style="white-space:pre-line; color:#b3261e; border-color:#b3261e;"><strong id="imp-error-msg"></strong></div>
+      <div class="banner warn" style="white-space:pre-line; color:var(--red); border-color:var(--red);"><strong id="imp-error-msg"></strong></div>
       <div style="display:flex; gap:8px; margin-top:12px;">
         <button class="btn" style="flex:1;" onclick="resetImport(); showPanel('inventory')">Back to Inventory</button>
         <button class="btn primary" style="flex:1;" onclick="showImportStep('review')">Try this import again</button>
@@ -538,7 +539,7 @@ const CLIENT_CONFIG = {
     <div class="metric-grid">
       <div class="metric"><div class="label" id="profit-sales-label">Sales (all time)</div><div class="val" id="profit-sales">₱ 0</div></div>
       <div class="metric"><div class="label">Cost of goods</div><div class="val" id="profit-cost">₱ 0</div></div>
-      <div class="metric" style="background:var(--green-bg);"><div class="label" style="color:#2D5A38;">Profit</div><div class="val" style="color:#2D5A38;" id="profit-net">₱ 0</div></div>
+      <div class="metric" style="background:var(--green-bg);"><div class="label" style="color:var(--green);">Profit</div><div class="val" style="color:var(--green);" id="profit-net">₱ 0</div></div>
     </div>
     <p class="mono" style="font-size:11px; text-transform:uppercase; color:var(--steel-2); margin:0 0 6px;">By staff member</p>
     <div id="staff-rows"></div>
@@ -1790,7 +1791,9 @@ function updateMargin(){
   const pct = sell > 0 ? Math.round((margin/sell)*100) : 0;
   const box = document.getElementById('margin-preview');
   document.getElementById('margin-val').textContent = `₱ ${margin} (${pct}%)`;
-  box.style.background = margin >= 0 ? 'var(--green-bg)' : 'var(--red-bg)';
+  box.classList.toggle('success', margin >= 0);
+  box.classList.toggle('danger', margin < 0);
+  box.style.background = '';
 }
 async function savePart(){
   const part = document.getElementById('np-partno').value || ('NEW-' + Date.now());
@@ -3761,7 +3764,7 @@ function renderProfit(){
   document.getElementById('profit-cost').textContent = '₱ ' + Math.round(cost).toLocaleString();
   document.getElementById('profit-net').textContent = '₱ ' + Math.round(sales - cost).toLocaleString();
   document.getElementById('staff-rows').innerHTML = Object.keys(byStaff).length
-    ? Object.entries(byStaff).map(([name, profit]) => `<div class="row-line" style="justify-content:space-between;"><span>${escapeHtml(name)}</span><strong style="color:#2D5A38;">+₱${Math.round(profit).toLocaleString()}</strong></div>`).join('')
+    ? Object.entries(byStaff).map(([name, profit]) => `<div class="row-line" style="justify-content:space-between;"><span>${escapeHtml(name)}</span><strong style="color:var(--green);">+₱${Math.round(profit).toLocaleString()}</strong></div>`).join('')
     : `<p style="font-size:13px; color:var(--steel-2);">No sales yet.</p>`;
 }
 function renderAccounts(){
@@ -4314,7 +4317,7 @@ function renderOwnerInventoryTable(){
     <div style="padding:12px; border:1px solid var(--line); border-radius:8px; margin-bottom:14px;">
       <div class="part-meta">${parts.length.toLocaleString()} of ${ownerCachedParts.length.toLocaleString()} parts shown · ${totalUnits.toLocaleString()} units on hand · ₱${totalValue.toLocaleString()} retail value</div>
       ${ownerGhostCount ? `<div class="part-meta" style="margin-top:6px; color:var(--warn, #a15c00);">${ownerGhostCount.toLocaleString()} incomplete record(s) hidden (no brand/part name synced yet) — ask the Admin to run "Push new parts to Firestore" again to repair them.</div>` : ''}
-      ${ownerCostError ? `<div class="part-meta" style="margin-top:6px; color:#b3261e;">Cost data failed to load (${escapeHtml(ownerCostError)}) — every Cost value below is showing blank/wrong as a result, not because it's actually missing. This is very likely a missing Firestore index for the costData collectionGroup query — check the Firebase Console for an index-creation prompt.</div>` : ''}
+      ${ownerCostError ? `<div class="part-meta" style="margin-top:6px; color:var(--red);">Cost data failed to load (${escapeHtml(ownerCostError)}) — every Cost value below is showing blank/wrong as a result, not because it's actually missing. This is very likely a missing Firestore index for the costData collectionGroup query — check the Firebase Console for an index-creation prompt.</div>` : ''}
     </div>
     ${ownerTable(
       [{label:'Code'},{label:'Brand'},{label:'Part'},{label:'Qty',right:true},{label:'Cost',right:true},{label:'Price',right:true}],
@@ -4399,7 +4402,7 @@ function renderOwnerProfitView(){
         <div class="row-line" style="justify-content:space-between;"><span>Potential margin sitting in stock</span><strong>₱${(retailValue-costValue).toLocaleString()}</strong></div>
         ${missingCost ? `<div class="part-meta" style="margin-top:8px;">${missingCost} part(s) have no cost data synced yet — excluded from cost totals above.</div>` : ''}
         ${ownerProfitGhostCount ? `<div class="part-meta" style="margin-top:4px; color:var(--warn, #a15c00);">${ownerProfitGhostCount.toLocaleString()} incomplete record(s) excluded (no brand/part name synced yet) — ask the Admin to run "Push new parts to Firestore" again to repair them.</div>` : ''}
-        ${ownerProfitCostError ? `<div class="part-meta" style="margin-top:4px; color:#b3261e;">Cost data failed to load (${escapeHtml(ownerProfitCostError)}) — "Stock at cost" and margin above are showing 0/wrong as a result, not because cost is actually missing. This is very likely a missing Firestore index for the costData collectionGroup query — check the Firebase Console for an index-creation prompt.</div>` : ''}
+        ${ownerProfitCostError ? `<div class="part-meta" style="margin-top:4px; color:var(--red);">Cost data failed to load (${escapeHtml(ownerProfitCostError)}) — "Stock at cost" and margin above are showing 0/wrong as a result, not because cost is actually missing. This is very likely a missing Firestore index for the costData collectionGroup query — check the Firebase Console for an index-creation prompt.</div>` : ''}
       </div>`;
   }
 }
