@@ -1263,6 +1263,29 @@ window.addEventListener('error', (event) => {
   console.error('Uncaught error:', event.error || event.message);
 });
 
+// ---- Owner Lobby: auto-refresh on regaining focus ----
+// Read-only, oversight-focused screens are exactly where stale-but-looks-
+// current data is most dangerous — it's how a leftover 894 Yamaha records
+// went unnoticed. Relying on someone remembering to tap Refresh isn't
+// enough for a screen whose whole job is telling them the truth. This
+// force-refreshes whenever the tab comes back into view after being away
+// for a while, on top of (not instead of) the now-much-louder stale-data
+// banner in loadOwnerTab for the times this doesn't fire (e.g. Refresh
+// wasn't tapped and the tab was never actually hidden).
+let ownerLobbyHiddenAt = null;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { ownerLobbyHiddenAt = Date.now(); return; }
+  if (ownerLobbyHiddenAt == null) return;
+  const hiddenForMs = Date.now() - ownerLobbyHiddenAt;
+  ownerLobbyHiddenAt = null;
+  if (hiddenForMs < 15000) return; // a quick alt-tab isn't "came back to check this later"
+  const ownerView = document.getElementById('owner-view');
+  const branchSel = document.getElementById('owner-branch-select');
+  if (ownerView && ownerView.style.display !== 'none' && branchSel && branchSel.value) {
+    loadOwnerTab(true);
+  }
+});
+
 
 // M-I-C-H-A-E-L-S-O-N maps to 1-2-3-4-5-6-7-8-9-0. "Code" here means the
 // coded PRICE of an item, not a coded name — those are different concepts
@@ -3184,6 +3207,14 @@ async function processSyncQueue(auto){
           t.objectStore(SYNC_QUEUE_STORE).put({ ...op, retryCount: (op.retryCount||0) + 1, lastError: (e && e.message) ? e.message : String(e), lastFailedAt: Date.now() });
           await new Promise((res,rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); });
         } catch (_) { /* best effort — worst case this op's failure just isn't recorded */ }
+        // A brand deletion failing here means Firestore still has that
+        // brand's records and nobody's watching this background retry loop
+        // to notice. Surface it in the same persistent Settings warning
+        // used for a verified-incomplete purge, immediately on first
+        // failure — not just after it eventually succeeds-but-incomplete.
+        if (op.type === 'brandDelete' && op.payload && op.payload.brand) {
+          try { await recordPurgeIncomplete(op.payload.brand, null); } catch (_) {}
+        }
         if (!navigator.onLine) break;
       }
     }
@@ -3408,7 +3439,7 @@ async function refreshBranchAccountsUI(){
     : 'This device has no branch assigned yet.')
     + (incomplete.length ? `<div class="banner warn" style="margin-top:10px; color:var(--red); border-color:var(--red);">
         <strong>\u26A0\uFE0F ${incomplete.length} brand${incomplete.length>1?'s':''} not fully removed from Firestore:</strong><br>
-        ${incomplete.map(e => `"${escapeHtml(e.brand)}" \u2014 ${e.remaining.toLocaleString()} record(s) still there (attempted ${new Date(e.at).toLocaleString()})`).join('<br>')}
+        ${incomplete.map(e => `"${escapeHtml(e.brand)}" \u2014 ${e.remaining == null ? 'still failing in the background, exact remaining count unknown' : e.remaining.toLocaleString() + ' record(s) still there'} (last attempt ${new Date(e.at).toLocaleString()})`).join('<br>')}
         <br>These were deleted on this device but Firestore still has leftover records tagged with these brand names. Run the orphan cleanup below to finish the job.
       </div>` : '');
 }
@@ -3554,6 +3585,10 @@ async function compareAdminVsFirestore(){
   // item-by-item comparison between what's on this device and what's
   // actually in Firestore right now, and reports precisely which parts
   // differ and how — no more counting two aggregate numbers and inferring.
+  // Also checks the reverse direction: Firestore docs with no local
+  // counterpart at all (orphans) — the blind spot that let an incomplete
+  // brand purge go unnoticed, since every other check here only ever
+  // starts from a local record and looks it up, never the other way round.
   if (!isAdmin) return;
   const branchId = await getBranchId();
   if (!branchId) { await showAlert('Assign this device to a branch first.'); return; }
@@ -3610,9 +3645,25 @@ async function compareAdminVsFirestore(){
     if (fs && fs.archived !== true && fs.brand && fs.part) localArchivedButFsNot.push(rec);
   }
 
+  // The check that was missing before, and specifically the reason the
+  // Yamaha leftovers went unnoticed: everything above only ever looks up
+  // a LOCAL record inside fsMap. It never asks the reverse question — does
+  // every Firestore doc correspond to something this device still knows
+  // about at all? A brand purged to completion locally has zero local
+  // records to iterate over, so nothing above would ever touch its leftover
+  // Firestore docs. This does the reverse pass: every Firestore doc with no
+  // local counterpart, regardless of what triggered it (an incomplete
+  // purge, an old incomplete sync stub, anything else).
+  const localKeys = new Set(localParts.map(p => partSyncKey(p)));
+  const orphanedInFirestore = [];
+  for (const [key, fs] of fsMap.entries()) {
+    if (!localKeys.has(key)) orphanedInFirestore.push({ key, fs });
+  }
+
   hideLoading();
 
   const fmt = (rec) => `${rec.brand || '(no brand)'} / ${rec.part || '(no part)'}`;
+  const fmtFs = (o) => `${o.fs.brand || '(no brand)'} / ${o.fs.part || '(no part)'}`;
   const lines = [
     `Local active parts: ${localActive.length}`,
     `Matched exactly (brand, part, active, price, qty, cost all agree): ${matched.length}`,
@@ -3623,12 +3674,14 @@ async function compareAdminVsFirestore(){
     `Qty differs from Firestore: ${qtyDiff.length}`,
     `Cost differs from Firestore: ${costError ? 'COULD NOT CHECK — ' + costError : costDiff.length}`,
     `Archived locally but still active in Firestore: ${localArchivedButFsNot.length}`,
+    `Orphaned in Firestore (no matching local record at all, active or archived): ${orphanedInFirestore.length}`,
   ];
   if (missing.length) lines.push('', `Missing (first 5): ${missing.slice(0,5).map(fmt).join('; ')}`);
   if (incomplete.length) lines.push('', `Incomplete (first 5): ${incomplete.slice(0,5).map(fmt).join('; ')}`);
   if (stuckArchived.length) lines.push('', `Stuck-archived (first 5): ${stuckArchived.slice(0,5).map(fmt).join('; ')}`);
   if (priceDiff.length) lines.push('', `Price diffs (first 5): ${priceDiff.slice(0,5).map(x => `${fmt(x.rec)} local=₱${x.localPrice} firestore=₱${x.fsPrice}`).join('; ')}`);
   if (costDiff.length) lines.push('', `Cost diffs (first 5): ${costDiff.slice(0,5).map(x => `${fmt(x.rec)} local=₱${x.localCost} firestore=₱${x.fsCost}`).join('; ')}`);
+  if (orphanedInFirestore.length) lines.push('', `Orphaned in Firestore (first 5): ${orphanedInFirestore.slice(0,5).map(fmtFs).join('; ')}`, `These don't match anything on this device at all — likely leftovers from an incomplete brand purge, or old incomplete sync stubs. Settings \u2192 "Clean up orphaned Firestore records" removes these.`);
   // Dropped the "most likely a missing Firestore index" guess from this
   // message — the raw text Firestore actually returns ("Missing or
   // insufficient permissions") is its standard wording for a rules
@@ -3637,7 +3690,7 @@ async function compareAdminVsFirestore(){
   // 'permission-denied' means rules, 'failed-precondition' means index.
   if (costError) lines.push('', `Cost comparison SKIPPED — the cost query itself failed${costErrorCode ? ` [${costErrorCode}]` : ''}: ${costError}. This is not the same as costs actually matching; it means they couldn't be checked at all.`);
 
-  console.log('Full comparison:', { missing, incomplete, stuckArchived, priceDiff, qtyDiff, costDiff, localArchivedButFsNot, costError, costErrorCode });
+  console.log('Full comparison:', { missing, incomplete, stuckArchived, priceDiff, qtyDiff, costDiff, localArchivedButFsNot, orphanedInFirestore, costError, costErrorCode });
   lines.push('', 'Full lists logged to the browser console (F12 → Console) if you need every item, not just the first 5 of each.');
   await showAlert(lines.join('\n'));
 }
@@ -4361,12 +4414,24 @@ async function loadOwnerTab(forceRefresh){
     else if (currentOwnerTab === 'accounts') await renderOwnerAccounts(branchId);
     if (currentOwnerTab !== 'approvals') refreshOwnerApprovalBadge(branchId); // fire-and-forget — don't block the tab that's actually loading
     renderOwnerToolbar(); // brand dropdown now has real options since data just got cached
-    status.textContent = fromCache
-      ? `Showing data loaded earlier this session — tap Refresh (top) for the latest.`
-      : `Last checked ${new Date().toLocaleTimeString()}`;
+    if (fromCache) {
+      // This used to be a single line of muted gray text at the bottom of
+      // the toolbar — exactly the kind of thing that's easy to not notice,
+      // which is how stale data got mistaken for a live check more than
+      // once. Now it's the same loud banner style used for the offline
+      // fallback above, prepended to the actual content, not just status text.
+      status.textContent = '';
+      view.innerHTML = `<div class="banner warn" style="margin-bottom:12px;">\u26A0\uFE0F This is data loaded earlier this session, not a fresh check. Tap Refresh above for the latest before trusting these numbers.</div>` + view.innerHTML;
+    } else {
+      status.textContent = `Last checked ${new Date().toLocaleTimeString()}`;
+    }
     // Snapshot the successful result so a later failure (offline, dropped
     // signal) has something real to fall back to instead of a blank error.
-    await metaPut(cacheKey, { html: view.innerHTML, at: Date.now() });
+    // Only snapshot on a genuinely fresh fetch — if this render itself came
+    // from cache, re-saving it would bake the "stale data" banner above
+    // into the cached HTML, so a later stale-render would show that banner
+    // twice, stacked, instead of once.
+    if (!fromCache) await metaPut(cacheKey, { html: view.innerHTML, at: Date.now() });
   } catch (e) {
     const cached = await metaGet(cacheKey);
     if (cached) {
