@@ -591,9 +591,11 @@ const CLIENT_CONFIG = {
         <button class="btn" onclick="pushBranchBaseline().then(refreshBranchAccountsUI)">Push new parts to Firestore</button>
         <button class="btn" onclick="runBranchDiagnostics()">Run diagnostics</button>
         <button class="btn" onclick="compareAdminVsFirestore()">Compare with Firestore (exact differences)</button>
+        <button class="btn" style="color:var(--red); border-color:var(--red);" onclick="runOrphanCleanup()">Clean up orphaned Firestore records</button>
       </div>
       <p class="part-meta" style="margin-top:8px;">"Push new parts to Firestore" adds any part that doesn't exist in Firestore for this branch yet, repairs incomplete records, and reactivates parts stuck marked archived in Firestore even though they're active locally. It never touches a part that's already fine there.</p>
       <p class="part-meta" style="margin-top:8px;"><strong>If this device isn't the only one used to sell or manage stock, run "Pull latest stock from Firestore" regularly</strong> (start of shift is a good habit) — it brings in quantity changes made by other devices (other admins, cashiers) that this device wouldn't otherwise know about. "Push new parts" only sends this device's own changes out; it doesn't bring anything in.</p>
+      <p class="part-meta" style="margin-top:8px;">"Clean up orphaned Firestore records" finds records in Firestore that don't match any brand this device currently knows about (active or trashed) — leftovers from a brand that was permanently deleted but didn't fully clear, or old incomplete sync stubs. It shows exactly what it found before deleting anything, and only touches Firestore, never this device's local data.</p>
     </div>
   </section>
 
@@ -809,15 +811,20 @@ async function deleteBrandRecords(storeName, brand){
 }
 async function deleteBrandInFirestore(branchId, brand, onProgress){
   // Removes every part doc (and its costData/current subdoc) for this brand
-  // from branches/{branchId}/parts. Without this, a locally-deleted brand
-  // keeps existing server-side and reappears via Owner Lobby, other
-  // branches' pulls, or a future re-pull on this device.
+  // from branches/{branchId}/parts, then RE-QUERIES to confirm nothing with
+  // this brand name is actually left. A batch.commit() resolving only means
+  // Firestore accepted the writes — it doesn't mean the collection is empty
+  // of this brand afterward. A doc this query never matched in the first
+  // place (this exact scenario — most of Yamaha survived a "successful"
+  // purge) would leave records behind while every step up to now reports
+  // success. Trusting the write instead of checking is exactly what went
+  // wrong before, so this returns a real remaining-count instead.
   if (!window.__fsSync) throw new Error('Firestore not available');
   const { dbFs, doc, collection, query, where, getDocs, writeBatch } = window.__fsSync;
   const snap = await getDocs(query(collection(dbFs, 'branches', branchId, 'parts'), where('brand', '==', brand)));
   const partIds = [];
   snap.forEach(d => partIds.push(d.id));
-  if (!partIds.length) return 0;
+  if (!partIds.length) return { deleted: 0, remaining: 0 };
   const chunkSize = 225; // 2 deletes per part (part + costData/current) stays under Firestore's 500-op batch limit
   for (let i = 0; i < partIds.length; i += chunkSize) {
     const chunk = partIds.slice(i, i + chunkSize);
@@ -829,7 +836,109 @@ async function deleteBrandInFirestore(branchId, brand, onProgress){
     await batch.commit();
     if (onProgress) onProgress(Math.min(i + chunkSize, partIds.length), partIds.length);
   }
-  return partIds.length;
+  const verifySnap = await getDocs(query(collection(dbFs, 'branches', branchId, 'parts'), where('brand', '==', brand)));
+  return { deleted: partIds.length, remaining: verifySnap.size };
+}
+// ---- Persistent "purge didn't fully finish" warning list ----
+// Survives page reloads (stored in meta, not just in-memory) and surfaces
+// in Settings until someone actually clears it — unlike the old one-time
+// toast, which is exactly what let the Yamaha leftovers go unnoticed.
+async function recordPurgeIncomplete(brand, remaining){
+  const list = (await metaGet('purgeIncomplete')) || [];
+  const filtered = list.filter(e => e.brand !== brand);
+  filtered.push({ brand, remaining, at: Date.now() });
+  await metaPut('purgeIncomplete', filtered);
+}
+async function clearPurgeIncomplete(brand){
+  const list = (await metaGet('purgeIncomplete')) || [];
+  const filtered = list.filter(e => e.brand !== brand);
+  if (filtered.length !== list.length) await metaPut('purgeIncomplete', filtered);
+}
+// ---- Orphan Firestore record cleanup ----
+// The delete-by-brand-name tools (deleteBrandInFirestore, and by extension
+// Purge) can only ever remove docs that still carry the exact brand name
+// they're told to look for. A doc with a mismatched/blank brand field is
+// invisible to them and survives forever — this is the only tool that can
+// actually reach those. It compares Firestore against what this device
+// still knows about (brands array — active OR trashed, so a merely-trashed
+// brand's data is never touched here, only truly purged/unknown brands).
+async function scanOrphanFirestoreDocs(branchId){
+  const { dbFs, collection, getDocs } = window.__fsSync;
+  const snap = await getDocs(collection(dbFs, 'branches', branchId, 'parts'));
+  const knownBrands = new Set(brands);
+  const buckets = new Map(); // brand name (or a "(no brand)" bucket) -> { count, ids }
+  snap.forEach(d => {
+    const v = d.data();
+    const b = v.brand || null;
+    if (b && knownBrands.has(b)) return; // matches a brand this device still knows about — not an orphan
+    const key = b || '(no brand/part \u2014 incomplete sync stub)';
+    if (!buckets.has(key)) buckets.set(key, { count: 0, ids: [] });
+    const bucket = buckets.get(key);
+    bucket.count++;
+    bucket.ids.push(d.id);
+  });
+  return buckets;
+}
+async function runOrphanCleanup(){
+  if (!isAdmin) return;
+  const branchId = await getBranchId();
+  if (!branchId) { await showAlert('Assign this device to a branch first.'); return; }
+  if (!window.__fsSync) { await showAlert('Firestore not available.'); return; }
+  showLoading('Scanning Firestore for orphaned records\u2026');
+  let buckets;
+  try {
+    buckets = await scanOrphanFirestoreDocs(branchId);
+  } catch (e) {
+    hideLoading();
+    await showAlert('Could not scan Firestore: ' + (e && e.message ? e.message : e));
+    return;
+  }
+  hideLoading();
+  const totalCount = Array.from(buckets.values()).reduce((s,b) => s+b.count, 0);
+  if (!totalCount) {
+    await showAlert('No orphaned records found \u2014 every Firestore record for this branch matches a brand this device still knows about (active or trashed).');
+    return;
+  }
+  const summary = Array.from(buckets.entries())
+    .sort((a,b) => b[1].count - a[1].count)
+    .map(([name, b]) => `${name}: ${b.count.toLocaleString()} record(s)`)
+    .join('\n');
+  const proceed = await showConfirm(
+    `Found ${totalCount.toLocaleString()} orphaned Firestore record(s) for this branch \u2014 records that don't match any brand this device currently knows about:\n\n${summary}\n\n` +
+    `These are typically leftovers from a brand that was permanently deleted but didn't fully clear from Firestore, or old incomplete sync stubs that never got a full record. This device's own local data is NOT touched \u2014 this only deletes from Firestore. This cannot be undone.\n\nProceed?`,
+    { confirmText: 'Delete orphans', cancelText: 'Cancel' }
+  );
+  if (!proceed) return;
+  const { dbFs, doc, writeBatch } = window.__fsSync;
+  const allIds = [];
+  for (const b of buckets.values()) allIds.push(...b.ids);
+  const chunkSize = 225; // 2 deletes per record (part + costData/current), under Firestore's 500-op batch limit
+  let done = 0;
+  showLoading(`Deleting ${totalCount.toLocaleString()} orphaned record(s)\u2026`);
+  try {
+    for (let i = 0; i < allIds.length; i += chunkSize) {
+      const chunk = allIds.slice(i, i + chunkSize);
+      const batch = writeBatch(dbFs);
+      for (const id of chunk) {
+        batch.delete(doc(dbFs, 'branches', branchId, 'parts', id));
+        batch.delete(doc(dbFs, 'branches', branchId, 'parts', id, 'costData', 'current'));
+      }
+      await batch.commit();
+      done += chunk.length;
+      setLoadingText(`Deleting orphaned record(s)\u2026 ${done.toLocaleString()}/${allIds.length.toLocaleString()}`);
+    }
+  } catch (e) {
+    hideLoading();
+    await showAlert(`Cleanup stopped partway (${done.toLocaleString()}/${allIds.length.toLocaleString()} deleted): ${e && e.message ? e.message : e}. Run this again to continue \u2014 it re-scans each time and only targets what's still actually there.`);
+    return;
+  }
+  for (const name of buckets.keys()) {
+    if (!name.startsWith('(no brand')) await clearPurgeIncomplete(name);
+  }
+  await auditWrite('ORPHAN_CLEANUP', { branchId, totalDeleted: allIds.length, byBrand: Object.fromEntries(Array.from(buckets.entries()).map(([k,v]) => [k, v.count])) });
+  hideLoading();
+  await refreshBranchAccountsUI();
+  await showAlert(`Cleanup complete. ${allIds.length.toLocaleString()} orphaned record(s) permanently deleted from Firestore.`);
 }
 async function setBrandArchivedInFirestore(branchId, brand, archived, onProgress){
   // Owner Lobby has no concept of "archived"/"trashed" locally — it just
@@ -1520,15 +1629,26 @@ async function ctxPurgeBrand(){
     // missing entirely. Without it the brand keeps existing on the server
     // and can reappear (Owner Lobby, other branches, a future re-pull).
     let cloudMsg = '';
+    let cloudIncomplete = false;
     const branchId = await getBranchId();
     if (branchId && window.__fsSync) {
       if (navigator.onLine) {
         try {
           setLoadingText(`Deleting "${brandLabel(brand)}" from the cloud…`);
-          const nCloud = await deleteBrandInFirestore(branchId, brand, (done, total) => {
+          const result = await deleteBrandInFirestore(branchId, brand, (done, total) => {
             setLoadingText(`Deleting "${brandLabel(brand)}" from the cloud… ${done.toLocaleString()}/${total.toLocaleString()}`);
           });
-          cloudMsg = nCloud ? ` Cloud copy also removed (${nCloud.toLocaleString()} record(s)).` : ' Nothing to remove in the cloud for this brand.';
+          if (result.remaining > 0) {
+            // The batch commits reported success but a re-query still finds
+            // records under this brand name — exactly what happened with
+            // Yamaha. Don't let this look like a normal success message.
+            cloudIncomplete = true;
+            await recordPurgeIncomplete(brand, result.remaining);
+            cloudMsg = ` \u26A0\uFE0F CLOUD DELETE DID NOT FULLY COMPLETE: ${result.deleted.toLocaleString()} record(s) removed, but ${result.remaining.toLocaleString()} record(s) still exist in Firestore tagged "${brandLabel(brand)}" and were NOT removed. This will keep showing in Settings until it's cleaned up — use the orphan cleanup tool there.`;
+          } else {
+            await clearPurgeIncomplete(brand);
+            cloudMsg = result.deleted ? ` Cloud copy also removed (${result.deleted.toLocaleString()} record(s)) \u2014 verified gone, not just attempted.` : ' Nothing to remove in the cloud for this brand.';
+          }
         } catch (e) {
           await enqueueBrandDeleteSync(brand);
           cloudMsg = ` Cloud deletion couldn't complete right now (${e && e.message ? e.message : e}) — queued, will finish automatically once syncing works.`;
@@ -1538,10 +1658,14 @@ async function ctxPurgeBrand(){
         cloudMsg = ' Offline — cloud deletion queued and will finish once this device is back online.';
       }
     }
-    await auditWrite('BRAND_PURGED', { brand, partCount: nParts, backupCount: nBackup });
+    await auditWrite('BRAND_PURGED', { brand, partCount: nParts, backupCount: nBackup, cloudIncomplete });
     await refreshSyncStatusUI();
     hideLoading();
-    await showAlert(`"${brandLabel(brand)}" permanently deleted (${nParts.toLocaleString()} part(s), ${nBackup.toLocaleString()} backup row(s)).${cloudMsg}`);
+    if (cloudIncomplete) {
+      await showAlert(`"${brandLabel(brand)}" removed from this device.${cloudMsg}`, { title: 'Cloud deletion incomplete' });
+    } else {
+      await showAlert(`"${brandLabel(brand)}" permanently deleted (${nParts.toLocaleString()} part(s), ${nBackup.toLocaleString()} backup row(s)).${cloudMsg}`);
+    }
   } catch (e) {
     hideLoading();
     await showAlert('Could not permanently delete brand: ' + (e && e.message ? e.message : e));
@@ -3015,7 +3139,9 @@ async function processSyncQueue(auto){
           await setDoc(doc(dbFs, 'branches', branchId, 'parts', op.key), { price: op.payload.price, updatedAt: serverTimestamp() }, { merge: true });
           appliedCount++;
         } else if (opType === 'brandDelete') {
-          await deleteBrandInFirestore(branchId, op.payload.brand);
+          const result = await deleteBrandInFirestore(branchId, op.payload.brand);
+          if (result.remaining > 0) await recordPurgeIncomplete(op.payload.brand, result.remaining);
+          else await clearPurgeIncomplete(op.payload.brand);
           appliedCount++;
         } else if (opType === 'brandArchive') {
           await setBrandArchivedInFirestore(branchId, op.payload.brand, op.payload.archived);
@@ -3275,10 +3401,16 @@ async function refreshBranchAccountsUI(){
   if (!el) return;
   const branchId = await getBranchId();
   const lastSeed = await metaGet('lastBaselineSeedAt');
-  el.innerHTML = branchId
+  const incomplete = (await metaGet('purgeIncomplete')) || [];
+  el.innerHTML = (branchId
     ? `This device is assigned to branch <strong>${escapeHtml(branchId)}</strong>.` +
       (lastSeed ? ` Last baseline push: ${new Date(lastSeed).toLocaleString()}.` : ' Baseline has never been pushed from this device.')
-    : 'This device has no branch assigned yet.';
+    : 'This device has no branch assigned yet.')
+    + (incomplete.length ? `<div class="banner warn" style="margin-top:10px; color:var(--red); border-color:var(--red);">
+        <strong>\u26A0\uFE0F ${incomplete.length} brand${incomplete.length>1?'s':''} not fully removed from Firestore:</strong><br>
+        ${incomplete.map(e => `"${escapeHtml(e.brand)}" \u2014 ${e.remaining.toLocaleString()} record(s) still there (attempted ${new Date(e.at).toLocaleString()})`).join('<br>')}
+        <br>These were deleted on this device but Firestore still has leftover records tagged with these brand names. Run the orphan cleanup below to finish the job.
+      </div>` : '');
 }
 
 async function doPullFromFirestore(silent){
