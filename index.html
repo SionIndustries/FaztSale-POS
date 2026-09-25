@@ -1282,7 +1282,13 @@ document.addEventListener('visibilitychange', () => {
   const ownerView = document.getElementById('owner-view');
   const branchSel = document.getElementById('owner-branch-select');
   if (ownerView && ownerView.style.display !== 'none' && branchSel && branchSel.value) {
-    loadOwnerTab(true);
+    // Not forceRefresh: the TTL cache added alongside this (ownerCacheGet)
+    // already decides whether the last read is still fresh enough to
+    // reuse. Forcing a full re-fetch on every single visibility regain,
+    // even seconds after the last one, would undo the whole point of
+    // adding that cache — this only needs to trigger the *check*, not
+    // guarantee a network read every time.
+    loadOwnerTab(false);
   }
 });
 
@@ -4489,10 +4495,46 @@ function costErrorHint(code){
   if (code === 'permission-denied') return 'This is a security rules problem, not an index problem \u2014 the signed-in account doesn\u2019t satisfy the costData read rule (isOwner() or isBranchAdmin(branchId) for its own branch). Check which role/branch this session actually has.';
   return 'Check the browser console for the full error \u2014 the exact Firestore error code (not just the message) determines whether this is a missing index or a rules problem.';
 }
+// ---- Owner Lobby read cache: TTL + persisted, not delta ----
+// The old cache never expired (data from hours ago in the same tab was
+// trusted exactly as much as data from ten seconds ago) and was in-memory
+// only, wiped by a plain reload — meaning every reload re-paid for a full
+// parts-collection read, one per document, even seconds after the last
+// one. This adds a TTL (stale data forces a real re-fetch on its own, a
+// second layer under the loud staleness banner and visibility-triggered
+// refresh added earlier) and persists to IndexedDB so a reload can reuse
+// a still-fresh read instead of re-fetching everything.
+//
+// Deliberately NOT a field-level delta merge like the Admin device's pull.
+// A delta merge only ever adds/updates records it's told about and has no
+// way to notice a record that was deleted upstream — which is exactly the
+// blind spot that let the Yamaha leftovers go unnoticed today. A full
+// re-read once the TTL expires stays accurate by construction; the
+// trade-off is real usage isn't cut as aggressively as a true delta would,
+// in exchange for not reintroducing that exact risk on the one screen
+// whose whole job is catching it.
+const OWNER_CACHE_TTL_MS = 3 * 60 * 1000;
+async function ownerCacheGet(cacheKey){
+  let entry = ownerSessionCache[cacheKey];
+  if (!entry) {
+    try {
+      const persisted = await metaGet('ownerDataCache:' + cacheKey);
+      if (persisted) { entry = persisted; ownerSessionCache[cacheKey] = persisted; }
+    } catch (_) { /* best effort — falls through to a real fetch */ }
+  }
+  if (!entry) return null;
+  if (Date.now() - entry.at > OWNER_CACHE_TTL_MS) return null; // expired — caller does a real fetch
+  return entry;
+}
+async function ownerCacheSet(cacheKey, data){
+  const entry = { ...data, at: Date.now() };
+  ownerSessionCache[cacheKey] = entry;
+  try { await metaPut('ownerDataCache:' + cacheKey, entry); } catch (_) { /* in-memory cache still works this tab even if persistence fails */ }
+}
 async function renderOwnerInventory(branchId, forceRefresh){
   const cacheKey = `${branchId}::inventory`;
-  const cached = ownerSessionCache[cacheKey];
-  if (!forceRefresh && cached) {
+  const cached = forceRefresh ? null : await ownerCacheGet(cacheKey);
+  if (cached) {
     ownerCachedParts = cached.parts; ownerCachedCostMap = cached.costMap; ownerGhostCount = cached.ghostCount; ownerCostError = cached.costError || null; ownerCostErrorCode = cached.costErrorCode || null;
     renderOwnerInventoryTable();
     return true; // served from cache
@@ -4522,7 +4564,7 @@ async function renderOwnerInventory(branchId, forceRefresh){
   ownerCachedCostMap = costMap;
   ownerCostError = costResult.error;
   ownerCostErrorCode = costResult.code || null;
-  ownerSessionCache[cacheKey] = { parts, costMap, ghostCount, costError: costResult.error, costErrorCode: costResult.code || null, at: Date.now() };
+  await ownerCacheSet(cacheKey, { parts, costMap, ghostCount, costError: costResult.error, costErrorCode: costResult.code || null });
   renderOwnerInventoryTable();
   return false;
 }
@@ -4547,8 +4589,8 @@ function renderOwnerInventoryTable(){
 }
 async function renderOwnerProfit(branchId, forceRefresh){
   const cacheKey = `${branchId}::profit::${ownerDateFilter}`;
-  const cached = ownerSessionCache[cacheKey];
-  if (!forceRefresh && cached) {
+  const cached = forceRefresh ? null : await ownerCacheGet(cacheKey);
+  if (cached) {
     if (ownerDateFilter) ownerCachedProfitSales = cached.sales;
     else { ownerCachedProfitParts = cached.parts; ownerCachedProfitCostMap = cached.costMap; ownerProfitGhostCount = cached.ghostCount || 0; ownerProfitCostError = cached.costError || null; ownerProfitCostErrorCode = cached.costErrorCode || null; }
     renderOwnerProfitView();
@@ -4566,7 +4608,7 @@ async function renderOwnerProfit(branchId, forceRefresh){
       snap.forEach(d => rows.push(d.data()));
     } catch(e) { /* no sales synced for that date, or index still building */ }
     ownerCachedProfitSales = rows;
-    ownerSessionCache[cacheKey] = { sales: rows, at: Date.now() };
+    await ownerCacheSet(cacheKey, { sales: rows });
   } else {
     const [partsSnap, costResult] = await Promise.all([getDocs(collection(dbFs,'branches',branchId,'parts')), getOwnerCostMap(branchId)]);
     const costMap = costResult.map;
@@ -4587,7 +4629,7 @@ async function renderOwnerProfit(branchId, forceRefresh){
     ownerProfitGhostCount = ghostCount;
     ownerProfitCostError = costResult.error;
     ownerProfitCostErrorCode = costResult.code || null;
-    ownerSessionCache[cacheKey] = { parts, costMap, ghostCount, costError: costResult.error, costErrorCode: costResult.code || null, at: Date.now() };
+    await ownerCacheSet(cacheKey, { parts, costMap, ghostCount, costError: costResult.error, costErrorCode: costResult.code || null });
   }
   renderOwnerProfitView();
   return false;
