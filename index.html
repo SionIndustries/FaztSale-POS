@@ -351,9 +351,10 @@ const CLIENT_CONFIG = {
   </section>
 
   <section class="panel" id="panel-inventory">
-    <div class="metric-grid admin-only" style="grid-template-columns:1fr 1fr;">
+    <div class="metric-grid admin-only" style="grid-template-columns:1fr 1fr 1fr;">
+      <div class="metric"><div class="label">Units on hand — this sheet</div><div class="val" id="inv-units-total">0</div></div>
       <div class="metric"><div class="label">Stock value (at cost) — this sheet</div><div class="val" id="inv-cost-total">₱ 0</div></div>
-      <div class="metric" style="background:var(--green-bg);"><div class="label" style="color:var(--green);">Potential revenue — this sheet</div><div class="val" style="color:var(--green);" id="inv-rev-total">₱ 0</div></div>
+      <div class="metric" style="background:var(--green-bg);"><div class="label" style="color:var(--green);">Retail value — this sheet</div><div class="val" style="color:var(--green);" id="inv-rev-total">₱ 0</div></div>
     </div>
     <div style="display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;">
       <input type="text" id="inv-search" placeholder="Search part no. or description (this sheet)" style="flex:1; min-width:160px;" oninput="onInvSearchInput(this.value)">
@@ -361,9 +362,6 @@ const CLIENT_CONFIG = {
       <label class="btn admin-only" style="display:flex; align-items:center; gap:6px; font-size:13px;"><input type="checkbox" id="inv-show-trash" style="width:auto;" onchange="refreshInventoryView(true); refreshBrandSheets()"> Show trash</label>
       <button class="btn icon admin-only" onclick="resetImport(); showPanel('import')">Import pricelist (.xlsx)</button>
       <button class="btn icon" id="add-part-btn" onclick="showPanel('addpart')">+ Add part</button>
-      <button class="btn icon admin-only" onclick="exportFullDB()">Export full backup (.json)</button>
-      <input type="file" id="import-db-file" accept=".json" style="display:none" onchange="importFullDB(this.files[0])">
-      <button class="btn icon admin-only danger" onclick="document.getElementById('import-db-file').click()">Import / restore backup</button>
       <button class="btn icon admin-only" onclick="bulkAdjustPrice(activeBrand, 'pct', parseFloat(prompt('% change to sell price for '+activeBrand+', e.g. 10 or -5')))">Bulk adjust price (active brand)</button>
       <span class="btn admin-only" style="display:flex; align-items:center; gap:6px;">Low-stock at ≤ <input type="number" value="5" style="width:56px;" onchange="setLowStockThreshold(this.value)"></span>
     </div>
@@ -580,6 +578,16 @@ const CLIENT_CONFIG = {
     <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px;">
       <button class="btn" onclick="openManual()">Manual guide</button>
       <button class="btn" onclick="doLogout()">Log out</button>
+    </div>
+
+    <div class="admin-only" style="margin-top:6px; border-top:1px solid var(--line); padding-top:16px;">
+      <p class="part-meta" style="margin:0 0 8px;">Backup (this device's local data)</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn" onclick="exportFullDB()">Export full backup (.json)</button>
+        <input type="file" id="import-db-file" accept=".json" style="display:none" onchange="importFullDB(this.files[0])">
+        <button class="btn danger" onclick="document.getElementById('import-db-file').click()">Import / restore backup</button>
+      </div>
+      <p class="part-meta" style="margin-top:8px;">This backs up (or restores) <strong>this device's local data only</strong> — it's a different thing from the branch tools below, which talk to Firestore. Export downloads everything currently on this device to a file; Import/restore overwrites this device's local data with a previously exported file. Neither one touches the cloud.</p>
     </div>
 
     <div class="admin-only" style="margin-top:6px; border-top:1px solid var(--line); padding-top:16px;">
@@ -1765,6 +1773,7 @@ async function refreshInventoryView(resetPage){
   const q = document.getElementById('inv-search').value.trim();
   const includeArchived = document.getElementById('inv-show-archived').checked;
   const summary = statsSummaryFor(brand);
+  document.getElementById('inv-units-total').textContent = Math.round(summary.qty).toLocaleString();
   document.getElementById('inv-cost-total').textContent = '₱ ' + Math.round(summary.costVal).toLocaleString();
   document.getElementById('inv-rev-total').textContent = '₱ ' + Math.round(summary.revVal).toLocaleString();
   if (q) {
@@ -4575,11 +4584,24 @@ function renderOwnerInventoryTable(){
   if (q) parts = parts.filter(p => (p.brand||'').toLowerCase().includes(q) || (p.part||'').toLowerCase().includes(q) || (p.name||'').toLowerCase().includes(q));
   const totalUnits = parts.reduce((s,p) => s + (p.qty||0), 0);
   const totalValue = parts.reduce((s,p) => s + (p.qty||0) * (p.price||0), 0);
+  const totalCost = parts.reduce((s,p) => s + (p.qty||0) * (ownerCachedCostMap[p.key]||0), 0);
+  // Same labels, same card layout, same numbers as the Admin device's
+  // Inventory tab (Units on hand / Stock value at cost / Retail value) —
+  // this used to be a single line of plain text with a different name for
+  // the same "retail value" figure ("potential revenue" on the Admin
+  // side), which is exactly what made two screens showing the same math
+  // look like they disagreed with each other.
   view.innerHTML = `
+    <div class="part-meta" style="margin-bottom:8px;">${parts.length.toLocaleString()} of ${ownerCachedParts.length.toLocaleString()} parts shown${q || ownerBrandFilter ? '' : ' for this branch'}</div>
+    <div class="metric-grid">
+      <div class="metric"><div class="label">Units on hand</div><div class="val">${totalUnits.toLocaleString()}</div></div>
+      <div class="metric"><div class="label">Stock value (at cost)</div><div class="val">${ownerCostError ? '\u2014' : '₱'+Math.round(totalCost).toLocaleString()}</div></div>
+      <div class="metric" style="background:var(--green-bg);"><div class="label" style="color:var(--green);">Retail value</div><div class="val" style="color:var(--green);">₱${Math.round(totalValue).toLocaleString()}</div></div>
+    </div>
     <div style="padding:12px; border:1px solid var(--line); border-radius:8px; margin-bottom:14px;">
-      <div class="part-meta">${parts.length.toLocaleString()} of ${ownerCachedParts.length.toLocaleString()} parts shown · ${totalUnits.toLocaleString()} units on hand · ₱${totalValue.toLocaleString()} retail value</div>
-      ${ownerGhostCount ? `<div class="part-meta" style="margin-top:6px; color:var(--warn, #a15c00);">${ownerGhostCount.toLocaleString()} incomplete record(s) hidden (no brand/part name synced yet) — ask the Admin to run "Push new parts to Firestore" again to repair them.</div>` : ''}
-      ${ownerCostError ? `<div class="part-meta" style="margin-top:6px; color:var(--red);">Cost data failed to load (${escapeHtml(ownerCostError)}) — every Cost value below is showing blank/wrong as a result, not because it's actually missing. ${costErrorHint(ownerCostErrorCode)}</div>` : ''}
+      ${ownerGhostCount ? `<div class="part-meta">${ownerGhostCount.toLocaleString()} incomplete record(s) hidden (no brand/part name synced yet) — ask the Admin to run "Push new parts to Firestore" again to repair them.</div>` : ''}
+      ${ownerCostError ? `<div class="part-meta" style="margin-top:${ownerGhostCount?'6px':'0'}; color:var(--red);">Cost data failed to load (${escapeHtml(ownerCostError)}) — Stock value (at cost) above is showing "\u2014" as a result, not because it's actually zero. ${costErrorHint(ownerCostErrorCode)}</div>` : ''}
+      ${!ownerGhostCount && !ownerCostError ? `<div class="part-meta">Everything below matches what's actually synced to the cloud for this branch.</div>` : ''}
     </div>
     ${ownerTable(
       [{label:'Code'},{label:'Brand'},{label:'Part'},{label:'Qty',right:true},{label:'Cost',right:true},{label:'Price',right:true}],
