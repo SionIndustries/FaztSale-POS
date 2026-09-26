@@ -904,6 +904,8 @@ async function runOrphanCleanup(){
   hideLoading();
   const totalCount = Array.from(buckets.values()).reduce((s,b) => s+b.count, 0);
   if (!totalCount) {
+    await metaPut('lastOrphanCleanupAt', Date.now());
+    await refreshBranchAccountsUI();
     await showAlert('No orphaned records found \u2014 every Firestore record for this branch matches a brand this device still knows about (active or trashed).');
     return;
   }
@@ -944,6 +946,7 @@ async function runOrphanCleanup(){
     if (!name.startsWith('(no brand')) await clearPurgeIncomplete(name);
   }
   await auditWrite('ORPHAN_CLEANUP', { branchId, totalDeleted: allIds.length, byBrand: Object.fromEntries(Array.from(buckets.entries()).map(([k,v]) => [k, v.count])) });
+  await metaPut('lastOrphanCleanupAt', Date.now());
   hideLoading();
   await refreshBranchAccountsUI();
   await showAlert(`Cleanup complete. ${allIds.length.toLocaleString()} orphaned record(s) permanently deleted from Firestore.`);
@@ -3112,7 +3115,7 @@ async function manualSyncNowImpl(){
   } else if (stillStuck) {
     await showAlert(`Synced ${cleared} change(s). ${stillStuck} still stuck and failing — tap the sync status line above for details.`);
   } else if (after.length) {
-    await showAlert(`Synced ${cleared} change(s). ${after.length} more still queued — they'll go out shortly (auto-sync retries every 20s), or tap Sync now again.`);
+    await showAlert(`Synced ${cleared} change(s). ${after.length} more still queued — they'll go out shortly (auto-sync retries every 60s), or tap Sync now again.`);
   } else {
     await showAlert(`Synced ${cleared} change(s). Everything's caught up.`);
   }
@@ -3330,7 +3333,7 @@ async function viewSyncDiagnostics(){
     `Branch: ${branchId || '(none assigned)'}`,
     `Firestore loaded: ${window.__fsSync ? 'yes' : 'NO \u2014 this is why nothing syncs. Usually means this domain isn\u2019t in Firebase Auth\u2019s authorized domains list, or the Firebase SDK failed to load (network/ad-blocker).'}`,
     `Online: ${navigator.onLine ? 'yes' : 'no'}`,
-    `Auto-sync: ${autoSyncEnabled ? 'on (checks every 20s)' : 'OFF \u2014 turn it back on in the toggle below the sync status, or nothing will sync until you tap Sync Now'}`,
+    `Auto-sync: ${autoSyncEnabled ? 'on (checks every 60s)' : 'OFF \u2014 turn it back on in the toggle below the sync status, or nothing will sync until you tap Sync Now'}`,
     `Currently syncing: ${syncInProgress ? 'yes' : 'no'}`,
     `Pending: ${fresh} fresh, ${stuck.length} stuck`,
     `Last completed sync run: ${lastSync ? new Date(lastSync).toLocaleString() : 'never'}`,
@@ -3371,7 +3374,7 @@ async function viewSyncDiagnostics(){
 }
 window.addEventListener('online', () => { refreshSyncStatusUI(); if (autoSyncEnabled) processSyncQueue(true); checkMyApprovals(true); });
 window.addEventListener('offline', () => refreshSyncStatusUI());
-setInterval(() => { if (autoSyncEnabled) processSyncQueue(true); }, 20000);
+setInterval(() => { if (autoSyncEnabled) processSyncQueue(true); }, 60000);
 setInterval(() => { checkMyApprovals(true); }, 60000); // cheap single-equality query against this cashier's own small request list — safe to check every minute
 
 async function pushBranchBaseline(){
@@ -3481,6 +3484,10 @@ async function refreshBranchAccountsUI(){
   const branchId = await getBranchId();
   const lastSeed = await metaGet('lastBaselineSeedAt');
   const incomplete = (await metaGet('purgeIncomplete')) || [];
+  const lastCompare = await metaGet('lastCompareAt');
+  const lastCleanup = await metaGet('lastOrphanCleanupAt');
+  const lastDiag = await metaGet('lastDiagnosticsAt');
+  const fmtLast = (ts) => ts ? new Date(ts).toLocaleString() : 'never';
   el.innerHTML = (branchId
     ? `This device is assigned to branch <strong>${escapeHtml(branchId)}</strong>.` +
       (lastSeed ? ` Last baseline push: ${new Date(lastSeed).toLocaleString()}.` : ' Baseline has never been pushed from this device.')
@@ -3489,7 +3496,13 @@ async function refreshBranchAccountsUI(){
         <strong>\u26A0\uFE0F ${incomplete.length} brand${incomplete.length>1?'s':''} not fully removed from Firestore:</strong><br>
         ${incomplete.map(e => `"${escapeHtml(e.brand)}" \u2014 ${e.remaining == null ? 'still failing in the background, exact remaining count unknown' : e.remaining.toLocaleString() + ' record(s) still there'} (last attempt ${new Date(e.at).toLocaleString()})`).join('<br>')}
         <br>These were deleted on this device but Firestore still has leftover records tagged with these brand names. Run the orphan cleanup below to finish the job.
-      </div>` : '');
+      </div>` : '')
+    // These three are all full-collection scans (one read per document) —
+    // showing when each last ran is meant to discourage reflexively
+    // re-clicking them out of anxiety, the exact habit that drove a real
+    // usage spike once already, without stopping anyone from running them
+    // when there's an actual reason to.
+    + `<p class="part-meta" style="margin-top:10px;">Last run — Compare with Firestore: ${fmtLast(lastCompare)} · Orphan cleanup: ${fmtLast(lastCleanup)} · Diagnostics: ${fmtLast(lastDiag)}</p>`;
 }
 
 async function doPullFromFirestore(silent){
@@ -3604,11 +3617,15 @@ async function pullLatestFromFirestore(){
 }
 let autoPullInFlight = false;
 async function autoPullTick(){
-  // The automatic half of "automatic and manual." Deliberately much less
-  // frequent than the 20s push cycle — this reads the ENTIRE parts
-  // collection every time, which is exactly the pattern that burned
-  // through the Firebase free-tier daily quota before. Runs every 10
-  // minutes, only when there's nothing risky to clobber.
+  // The automatic half of "automatic and manual." Runs every 10 minutes,
+  // only when there's nothing risky to clobber. Skips entirely while the
+  // tab isn't visible — a device left open in the background all day was
+  // otherwise checking in on a timer nobody was watching, for nothing.
+  // (Doesn't do a full collection read every time despite what an earlier
+  // version of this comment said — doPullFromFirestore uses a cheap
+  // updatedAt-delta query after the first-ever pull on this device; only
+  // that first pull, or a branch switch, is the expensive full scan.)
+  if (document.hidden) return;
   if (!isAdmin || isOwnerSession || autoPullInFlight) return;
   if (!autoSyncEnabled || !navigator.onLine || !window.__fsSync) return;
   const branchId = await getBranchId();
@@ -3740,6 +3757,8 @@ async function compareAdminVsFirestore(){
 
   console.log('Full comparison:', { missing, incomplete, stuckArchived, priceDiff, qtyDiff, costDiff, localArchivedButFsNot, orphanedInFirestore, costError, costErrorCode });
   lines.push('', 'Full lists logged to the browser console (F12 → Console) if you need every item, not just the first 5 of each.');
+  await metaPut('lastCompareAt', Date.now());
+  await refreshBranchAccountsUI();
   await showAlert(lines.join('\n'));
 }
 async function runBranchDiagnostics(){
@@ -3785,6 +3804,8 @@ async function runBranchDiagnostics(){
   }
 
   hideLoading();
+  await metaPut('lastDiagnosticsAt', Date.now());
+  await refreshBranchAccountsUI();
   await showAlert(out.join('\n\n'));
   console.log(out.join('\n'));
 }
