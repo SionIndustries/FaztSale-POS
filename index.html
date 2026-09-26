@@ -2706,11 +2706,34 @@ async function pullBranchFromFirestore(branchId){
     await showAlert(`Warning: cost data couldn't be read while pulling this branch${costErrorCode ? ` [${costErrorCode}]` : ''} (${costError}).\n\nEvery part is being seeded with cost = 0 as a result. Check the browser console (F12) for the full error and its code, then pull again once it's resolved.`);
   }
   const records = [];
+  const archivedBrandsFound = new Set();
   partsSnap.forEach(d => {
     const p = d.data();
-    records.push(makeRecord(p.part || '', p.name || p.part || '', p.brand || '', p.qty || 0, costMap[d.id] || 0, p.price || 0, p.extra || {}, p.code || ''));
+    // Skip incomplete sync stubs (no brand AND no part) entirely — these
+    // are leftovers from a quantity-only update that never got a full
+    // record, same ones the Owner Lobby already hides. Without this, a
+    // brand-new device would seed itself with hundreds of blank rows.
+    if (!p.brand && !p.part) return;
+    const rec = makeRecord(p.part || '', p.name || p.part || '', p.brand || '', p.qty || 0, costMap[d.id] || 0, p.price || 0, p.extra || {}, p.code || '');
+    // Respect Firestore's own archived flag instead of always seeding
+    // active. Without this, a brand trashed on the original device (still
+    // legitimately in Firestore, since Trash \u2260 Purge) would arrive on a
+    // new device as live, sellable stock — the opposite of what "trashed"
+    // is supposed to mean.
+    rec.archived = p.archived === true;
+    if (rec.archived && rec.brand) archivedBrandsFound.add(rec.brand);
+    records.push(rec);
   });
-  return records;
+  return { records, archivedBrandsFound };
+}
+async function applyPulledArchivedBrands(archivedBrandsFound){
+  if (!archivedBrandsFound || !archivedBrandsFound.size) return;
+  let changed = false;
+  for (const b of archivedBrandsFound) {
+    if (!trashedBrands.has(b)) { trashedBrands.add(b); changed = true; }
+    if (!brands.includes(b)) brands.push(b); // so the brand tab exists at all, just hidden behind "Show trash"
+  }
+  if (changed) { await metaPut('trashedBrands', Array.from(trashedBrands)); await metaPut('brands', brands); }
 }
 async function resolveDeviceBranch(accountBranchId){
   const localBranchId = await getBranchId();
@@ -2723,8 +2746,9 @@ async function resolveDeviceBranch(accountBranchId){
     _branchId = accountBranchId;
     await auditWrite('BRANCH_AUTO_PROVISIONED', { branchId: accountBranchId });
     try {
-      const records = await pullBranchFromFirestore(accountBranchId);
+      const { records, archivedBrandsFound } = await pullBranchFromFirestore(accountBranchId);
       if (records.length) { await dbBulkPut(records); await rebuildStatsCache(); await persistStats(); }
+      await applyPulledArchivedBrands(archivedBrandsFound);
     } catch (e) {
       await showAlert(`Branch assigned, but could not pull ${accountBranchId}'s data yet: ${e.message}\nYou can keep working — it will sync normally once this succeeds.`);
     }
@@ -2767,12 +2791,21 @@ async function resolveDeviceBranch(accountBranchId){
 
   const db = await openDB();
   await new Promise((res,rej)=>{ const t=db.transaction(STORE,'readwrite'); t.objectStore(STORE).clear(); t.oncomplete=res; t.onerror=()=>rej(t.error); });
+  // The parts store gets cleared above, but brands/trashedBrands/archivedBrands
+  // are separate meta keys that weren't being reset — without this, a
+  // switch could leave the previous branch's brand names (and its trashed/
+  // archived state) mixed in with the new branch's, which the new
+  // applyPulledArchivedBrands() call below would then add to rather than
+  // replace.
+  brands = []; trashedBrands = new Set(); archivedBrands = new Set();
+  await metaPut('brands', brands); await metaPut('trashedBrands', []); await metaPut('archivedBrands', []);
   await metaPut('branchId', accountBranchId);
   _branchId = accountBranchId;
   await auditWrite('BRANCH_SWITCHED', { from: localBranchId, to: accountBranchId });
   try {
-    const records = await pullBranchFromFirestore(accountBranchId);
+    const { records, archivedBrandsFound } = await pullBranchFromFirestore(accountBranchId);
     if (records.length) await dbBulkPut(records);
+    await applyPulledArchivedBrands(archivedBrandsFound);
   } catch (e) {
     await showAlert(`Switched to ${accountBranchId}, but could not pull its data yet: ${e.message}`);
   }
